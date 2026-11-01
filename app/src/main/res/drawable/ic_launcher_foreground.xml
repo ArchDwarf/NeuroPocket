@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Микросхема с «нейронными» связями -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- контакты -->
+    <path android:strokeColor="#8FB3FF" android:strokeWidth="3" android:strokeLineCap="round"
+        android:pathData="M44,30v-6M54,30v-6M64,30v-6M44,84v-6M54,84v-6M64,84v-6M30,44h-6M30,54h-6M30,64h-6M84,44h-6M84,54h-6M84,64h-6" />
+    <!-- корпус -->
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M38,30h32a8,8 0,0 1,8 8v32a8,8 0,0 1,-8 8h-32a8,8 0,0 1,-8 -8v-32a8,8 0,0 1,8 -8z" />
+    <!-- связи -->
+    <path android:strokeColor="#3B5BDB" android:strokeWidth="2.5"
+        android:pathData="M44,44L64,54M44,64L64,54M44,44L54,64M44,64L54,44M54,44L64,54M54,64L64,54" />
+    <!-- нейроны -->
+    <path android:fillColor="#3B5BDB"
+        android:pathData="M44,44m-4,0a4,4 0,1 1,8 0a4,4 0,1 1,-8 0M44,64m-4,0a4,4 0,1 1,8 0a4,4 0,1 1,-8 0M54,44m-3.5,0a3.5,3.5 0,1 1,7 0a3.5,3.5 0,1 1,-7 0M54,64m-3.5,0a3.5,3.5 0,1 1,7 0a3.5,3.5 0,1 1,-7 0M64,54m-5,0a5,5 0,1 1,10 0a5,5 0,1 1,-10 0" />
+</vector>
