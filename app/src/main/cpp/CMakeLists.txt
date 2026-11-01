@@ -43,7 +43,6 @@ else()
     FetchContent_Declare(
         llama_cpp
         URL https://github.com/ggml-org/llama.cpp/archive/${LLAMA_CPP_COMMIT}.tar.gz
-        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     )
     FetchContent_MakeAvailable(llama_cpp)
 endif()
