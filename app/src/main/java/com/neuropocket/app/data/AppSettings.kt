@@ -14,6 +14,14 @@ data class Settings(
     val threads: Int = defaultThreads(),
     val hfToken: String = "",
     val activeModelPath: String = "",
+    /** До какого размера (по большей стороне) уменьшать фото для модели. */
+    val visionMaxSide: Int = 768,
+    /** Сколько кадров брать из видео. */
+    val videoFrames: Int = 6,
+    /** Активная модель для картинок. */
+    val imageModelPath: String = "",
+    /** Тип весов при загрузке модели картинок: "" — как в файле, иначе f16 / q8_0 / q4_0. */
+    val imageWeightType: String = "",
 ) {
     companion object {
         fun defaultThreads(): Int =
@@ -38,6 +46,10 @@ class AppSettings(context: Context) {
             threads = prefs.getInt("threads", d.threads),
             hfToken = prefs.getString("hfToken", "") ?: "",
             activeModelPath = prefs.getString("activeModelPath", "") ?: "",
+            visionMaxSide = prefs.getInt("visionMaxSide", d.visionMaxSide),
+            videoFrames = prefs.getInt("videoFrames", d.videoFrames),
+            imageModelPath = prefs.getString("imageModelPath", "") ?: "",
+            imageWeightType = prefs.getString("imageWeightType", "") ?: "",
         )
     }
 
@@ -52,5 +64,9 @@ class AppSettings(context: Context) {
         putInt("threads", s.threads)
         putString("hfToken", s.hfToken)
         putString("activeModelPath", s.activeModelPath)
+        putInt("visionMaxSide", s.visionMaxSide)
+        putInt("videoFrames", s.videoFrames)
+        putString("imageModelPath", s.imageModelPath)
+        putString("imageWeightType", s.imageWeightType)
     }
 }

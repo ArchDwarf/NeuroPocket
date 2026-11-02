@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.Create
 import androidx.compose.material.icons.filled.Face
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
@@ -33,7 +34,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import com.neuropocket.app.data.ModelKind
 import com.neuropocket.app.ui.ChatScreen
+import com.neuropocket.app.ui.ImageScreen
 import com.neuropocket.app.ui.MainViewModel
 import com.neuropocket.app.ui.ModelsScreen
 import com.neuropocket.app.ui.SettingsScreen
@@ -70,10 +73,14 @@ private fun App(vm: MainViewModel) {
                 )
                 NavigationBarItem(
                     selected = tab == 1, onClick = { tab = 1 },
-                    icon = { Icon(Icons.AutoMirrored.Filled.List, null) }, label = { Text("Модели") },
+                    icon = { Icon(Icons.Default.Create, null) }, label = { Text("Картинки") },
                 )
                 NavigationBarItem(
                     selected = tab == 2, onClick = { tab = 2 },
+                    icon = { Icon(Icons.AutoMirrored.Filled.List, null) }, label = { Text("Модели") },
+                )
+                NavigationBarItem(
+                    selected = tab == 3, onClick = { tab = 3 },
                     icon = { Icon(Icons.Default.Settings, null) }, label = { Text("Настройки") },
                 )
             }
@@ -81,8 +88,9 @@ private fun App(vm: MainViewModel) {
     ) { padding ->
         val mod = Modifier.padding(padding).consumeWindowInsets(padding)
         when (tab) {
-            0 -> ChatScreen(vm, mod, onOpenModels = { tab = 1 })
-            1 -> ModelsScreen(vm, mod)
+            0 -> ChatScreen(vm, mod, onOpenModels = { vm.switchKind(ModelKind.CHAT); tab = 2 })
+            1 -> ImageScreen(vm, mod, onOpenModels = { vm.switchKind(ModelKind.IMAGE); tab = 2 })
+            2 -> ModelsScreen(vm, mod)
             else -> SettingsScreen(vm, mod)
         }
     }

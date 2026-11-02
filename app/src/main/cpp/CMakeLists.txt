@@ -26,6 +26,10 @@ set(LLAMA_BUILD_SERVER     OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_APP        OFF CACHE BOOL "" FORCE)
 set(LLAMA_OPENSSL          OFF CACHE BOOL "" FORCE)
 set(LLAMA_CURL             OFF CACHE BOOL "" FORCE)
+# libmtmd — понимание картинок и видео (модели с mmproj-файлом)
+set(LLAMA_BUILD_MTMD       ON  CACHE BOOL "" FORCE)
+set(LLAMA_SUBPROCESS       OFF CACHE BOOL "" FORCE)
+set(MTMD_VIDEO             OFF CACHE BOOL "" FORCE)
 set(GGML_NATIVE            OFF CACHE BOOL "" FORCE)
 set(GGML_OPENMP            OFF CACHE BOOL "" FORCE)
 set(GGML_LLAMAFILE         OFF CACHE BOOL "" FORCE)
@@ -51,6 +55,7 @@ add_library(neuropocket SHARED llm_jni.cpp)
 
 target_link_libraries(neuropocket
     llama
+    mtmd
     ggml
     android
     log)

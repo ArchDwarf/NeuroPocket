@@ -1,4 +1,4 @@
-// JNI-мост между Kotlin и llama.cpp.
+// JNI-мост между Kotlin и llama.cpp (+ libmtmd для картинок и видео).
 // Вся работа с моделью идёт на одном фоновом потоке (см. LlamaEngine.kt),
 // только stop() может вызываться из любого потока.
 
@@ -13,6 +13,8 @@
 
 #include "ggml-backend.h"
 #include "llama.h"
+#include "mtmd.h"
+#include "mtmd-helper.h"
 
 #define TAG "NeuroPocket"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -24,15 +26,27 @@ static constexpr int RES_TEMPLATE_ERROR = -1;
 static constexpr int RES_CONTEXT_FULL   = -2;
 static constexpr int RES_DECODE_ERROR   = -3;
 static constexpr int RES_BAD_HANDLE     = -4;
+static constexpr int RES_MEDIA_ERROR    = -5;
 
 static std::atomic<bool> g_abort{false};
+
+// Кусок промпта, уже лежащий в KV-кэше: текст (токены) или картинка (id).
+struct Piece {
+    bool media = false;
+    std::vector<llama_token> tokens;  // для текста
+    std::string id;                   // для картинки
+    llama_pos n_pos = 0;              // сколько позиций занимает
+    const mtmd_input_chunk *chunk = nullptr; // только на время generate()
+};
 
 struct Session {
     llama_model         *model   = nullptr;
     llama_context       *ctx     = nullptr;
     const llama_vocab   *vocab   = nullptr;
-    std::string          tmpl;      // шаблон чата из метаданных модели
-    std::vector<llama_token> cached; // токены, уже лежащие в KV-кэше
+    mtmd_context        *mctx    = nullptr; // модуль зрения (mmproj), может отсутствовать
+    std::string          tmpl;              // шаблон чата из метаданных модели
+    std::vector<Piece>   cached;            // что сейчас лежит в KV-кэше
+    llama_pos            n_past  = 0;
     int                  n_ctx   = 0;
     int                  n_batch = 0;
 };
@@ -43,14 +57,14 @@ static void log_callback(ggml_log_level level, const char *text, void *) {
     else if (level == GGML_LOG_LEVEL_WARN) prio = ANDROID_LOG_WARN;
     else if (level == GGML_LOG_LEVEL_INFO) prio = ANDROID_LOG_INFO;
     __android_log_write(prio, TAG, text);
+    (void) prio;
 }
 
 static bool abort_callback(void *) { return g_abort.load(); }
 
 static std::string jstring_to_std(JNIEnv *env, jstring s) {
     if (!s) return {};
-    // Берём байты через String.getBytes("UTF-8"), чтобы корректно
-    // передать эмодзи и любые символы вне BMP.
+    // String.getBytes("UTF-8") корректно передаёт эмодзи и символы вне BMP.
     jclass strCls = env->GetObjectClass(s);
     jmethodID getBytes = env->GetMethodID(strCls, "getBytes", "(Ljava/lang/String;)[B");
     jstring enc = env->NewStringUTF("UTF-8");
@@ -70,10 +84,9 @@ static std::string jstring_to_std(JNIEnv *env, jstring s) {
 // Длина самого длинного префикса, состоящего из целых UTF-8 символов.
 static size_t utf8_complete_prefix(const std::string &s) {
     size_t n = s.size();
-    // Смотрим максимум 3 последних байта: незавершённый символ может быть только там.
     for (size_t back = 1; back <= 4 && back <= n; ++back) {
         unsigned char c = static_cast<unsigned char>(s[n - back]);
-        if ((c & 0xC0) == 0x80) continue;              // байт продолжения
+        if ((c & 0xC0) == 0x80) continue;
         size_t need = 1;
         if ((c & 0xE0) == 0xC0) need = 2;
         else if ((c & 0xF0) == 0xE0) need = 3;
@@ -136,10 +149,30 @@ static bool format_chat(const Session *s,
     return false;
 }
 
-// Сбрасывает KV-кэш полностью.
 static void clear_cache(Session *s) {
     llama_memory_clear(llama_get_memory(s->ctx), true);
     s->cached.clear();
+    s->n_past = 0;
+}
+
+// Прогоняет токены через модель с явными позициями, начиная с pos.
+static int decode_tokens(Session *s, const llama_token *tokens, int n, llama_pos pos, bool logits_last) {
+    llama_batch batch = llama_batch_init(s->n_batch, 0, 1);
+    int rc = 0;
+    for (int i = 0; i < n && rc == 0; i += s->n_batch) {
+        int cnt = std::min(s->n_batch, n - i);
+        batch.n_tokens = cnt;
+        for (int j = 0; j < cnt; ++j) {
+            batch.token[j] = tokens[i + j];
+            batch.pos[j] = pos + i + j;
+            batch.n_seq_id[j] = 1;
+            batch.seq_id[j][0] = 0;
+            batch.logits[j] = (logits_last && i + j == n - 1) ? 1 : 0;
+        }
+        rc = llama_decode(s->ctx, batch);
+    }
+    llama_batch_free(batch);
+    return rc;
 }
 
 extern "C" {
@@ -147,6 +180,7 @@ extern "C" {
 JNIEXPORT void JNICALL
 Java_com_neuropocket_app_engine_LlamaNative_init(JNIEnv *env, jobject, jstring jlibDir) {
     llama_log_set(log_callback, nullptr);
+    mtmd_helper_log_set(log_callback, nullptr);
     std::string dir = jstring_to_std(env, jlibDir);
     LOGI("Загрузка CPU-бэкендов из %s", dir.c_str());
     ggml_backend_load_all_from_path(dir.c_str());
@@ -165,14 +199,20 @@ Java_com_neuropocket_app_engine_LlamaNative_systemInfo(JNIEnv *env, jobject) {
     return env->NewStringUTF(info.c_str());
 }
 
+JNIEXPORT jstring JNICALL
+Java_com_neuropocket_app_engine_LlamaNative_mediaMarker(JNIEnv *env, jobject) {
+    return env->NewStringUTF(mtmd_default_marker());
+}
+
 JNIEXPORT jlong JNICALL
-Java_com_neuropocket_app_engine_LlamaNative_load(JNIEnv *env, jobject, jstring jpath,
+Java_com_neuropocket_app_engine_LlamaNative_load(JNIEnv *env, jobject, jstring jpath, jstring jmmproj,
                                                  jint nCtx, jint nThreads) {
     std::string path = jstring_to_std(env, jpath);
+    std::string mmproj = jstring_to_std(env, jmmproj);
     g_abort.store(false);
 
     llama_model_params mp = llama_model_default_params();
-    mp.n_gpu_layers = 0; // всё считается на CPU телефона; веса читаются через mmap (по умолчанию)
+    mp.n_gpu_layers = 0; // всё считается на CPU телефона; веса читаются через mmap
     llama_model *model = llama_model_load_from_file(path.c_str(), mp);
     if (!model) {
         LOGE("Не удалось загрузить модель %s", path.c_str());
@@ -207,14 +247,33 @@ Java_com_neuropocket_app_engine_LlamaNative_load(JNIEnv *env, jobject, jstring j
     s->n_batch = (int) cp.n_batch;
     const char *t = llama_model_chat_template(model, nullptr);
     if (t) s->tmpl = t;
-    LOGI("Модель загружена, n_ctx=%d, шаблон: %s", s->n_ctx, s->tmpl.empty() ? "нет" : "есть");
+
+    if (!mmproj.empty()) {
+        mtmd_context_params mparams = mtmd_context_params_default();
+        mparams.use_gpu = false;
+        mparams.n_threads = nThreads;
+        mparams.print_timings = false;
+        mparams.warmup = false;
+        s->mctx = mtmd_init_from_file(mmproj.c_str(), model, mparams);
+        if (!s->mctx) {
+            LOGE("Не удалось загрузить модуль зрения %s", mmproj.c_str());
+        }
+    }
+    LOGI("Модель загружена, n_ctx=%d, зрение: %s", s->n_ctx, s->mctx ? "да" : "нет");
     return reinterpret_cast<jlong>(s);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_neuropocket_app_engine_LlamaNative_hasVision(JNIEnv *, jobject, jlong handle) {
+    auto *s = reinterpret_cast<Session *>(handle);
+    return (s && s->mctx && mtmd_support_vision(s->mctx)) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL
 Java_com_neuropocket_app_engine_LlamaNative_free(JNIEnv *, jobject, jlong handle) {
     auto *s = reinterpret_cast<Session *>(handle);
     if (!s) return;
+    if (s->mctx) mtmd_free(s->mctx);
     if (s->ctx) llama_free(s->ctx);
     if (s->model) llama_model_free(s->model);
     delete s;
@@ -231,8 +290,9 @@ Java_com_neuropocket_app_engine_LlamaNative_modelInfo(JNIEnv *env, jobject, jlon
     double params_b = (double) llama_model_n_params(s->model) / 1e9;
     double size_gb = (double) llama_model_size(s->model) / (1024.0 * 1024.0 * 1024.0);
     char out[768];
-    snprintf(out, sizeof(out), "%s\n%s · %.2fB параметров · %.2f ГБ · контекст %d",
-             name[0] ? name : "Модель", desc, params_b, size_gb, s->n_ctx);
+    snprintf(out, sizeof(out), "%s\n%s · %.2fB параметров · %.2f ГБ · контекст %d%s",
+             name[0] ? name : "Модель", desc, params_b, size_gb, s->n_ctx,
+             s->mctx ? " · видит изображения" : "");
     return env->NewStringUTF(out);
 }
 
@@ -249,9 +309,12 @@ Java_com_neuropocket_app_engine_LlamaNative_stop(JNIEnv *, jobject) {
 
 /**
  * Генерирует ответ ассистента для всей переписки.
- * Уже обработанное начало переписки берётся из KV-кэша, поэтому
- * каждое новое сообщение обрабатывается быстро.
  *
+ * В тексте сообщений картинки обозначены маркером mediaMarker(); для каждого
+ * маркера по порядку передаётся изображение RGB: images[i] (w[i]*h[i]*3 байт)
+ * и его постоянный id (чтобы не кодировать одну картинку повторно).
+ *
+ * Уже обработанное начало переписки берётся из KV-кэша.
  * callback.onToken(byte[]) получает кусочки текста в UTF-8;
  * если он вернёт false — генерация останавливается.
  *
@@ -261,6 +324,7 @@ JNIEXPORT jint JNICALL
 Java_com_neuropocket_app_engine_LlamaNative_generate(
         JNIEnv *env, jobject, jlong handle,
         jobjectArray jroles, jobjectArray jcontents,
+        jobjectArray jimages, jintArray jwidths, jintArray jheights, jobjectArray jids,
         jfloat temperature, jfloat topP, jint topK, jfloat repeatPenalty,
         jint maxTokens, jobject callback) {
 
@@ -268,7 +332,7 @@ Java_com_neuropocket_app_engine_LlamaNative_generate(
     if (!s) return RES_BAD_HANDLE;
     g_abort.store(false);
 
-    // --- 1. Собираем переписку и применяем шаблон чата модели ---
+    // --- 1. Переписка → текст по шаблону чата модели ---
     jsize n = env->GetArrayLength(jroles);
     std::vector<std::string> roles(n), contents(n);
     for (jsize i = 0; i < n; ++i) {
@@ -282,44 +346,165 @@ Java_com_neuropocket_app_engine_LlamaNative_generate(
     std::string prompt;
     if (!format_chat(s, roles, contents, prompt)) return RES_TEMPLATE_ERROR;
 
-    std::vector<llama_token> tokens = tokenize(s->vocab, prompt);
-    if (tokens.empty()) return RES_TEMPLATE_ERROR;
-    // Оставляем запас хотя бы на короткий ответ
-    if ((int) tokens.size() + 64 >= s->n_ctx) return RES_CONTEXT_FULL;
+    // --- 2. Разбиваем на куски: текст и картинки ---
+    std::vector<Piece> pieces;
+    mtmd_input_chunks *chunks = nullptr;
+    jsize n_images = jimages ? env->GetArrayLength(jimages) : 0;
 
-    // --- 2. Переиспользуем совпадающее начало из KV-кэша ---
-    size_t common = 0;
-    while (common < s->cached.size() && common < tokens.size() &&
-           s->cached[common] == tokens[common]) {
-        ++common;
+    if (s->mctx) {
+        std::vector<mtmd_bitmap *> bitmaps;
+        std::vector<jint> ws(n_images), hs(n_images);
+        if (n_images > 0) {
+            env->GetIntArrayRegion(jwidths, 0, n_images, ws.data());
+            env->GetIntArrayRegion(jheights, 0, n_images, hs.data());
+        }
+        for (jsize i = 0; i < n_images; ++i) {
+            auto arr = (jbyteArray) env->GetObjectArrayElement(jimages, i);
+            auto jid = (jstring) env->GetObjectArrayElement(jids, i);
+            jsize len = env->GetArrayLength(arr);
+            if (len != ws[i] * hs[i] * 3) {
+                env->DeleteLocalRef(arr);
+                env->DeleteLocalRef(jid);
+                for (auto *b : bitmaps) mtmd_bitmap_free(b);
+                return RES_MEDIA_ERROR;
+            }
+            jbyte *data = env->GetByteArrayElements(arr, nullptr);
+            mtmd_bitmap *bmp = mtmd_bitmap_init((uint32_t) ws[i], (uint32_t) hs[i],
+                                                reinterpret_cast<const unsigned char *>(data));
+            env->ReleaseByteArrayElements(arr, data, JNI_ABORT);
+            std::string id = jstring_to_std(env, jid);
+            if (bmp && !id.empty()) mtmd_bitmap_set_id(bmp, id.c_str());
+            env->DeleteLocalRef(arr);
+            env->DeleteLocalRef(jid);
+            if (!bmp) {
+                for (auto *b : bitmaps) mtmd_bitmap_free(b);
+                return RES_MEDIA_ERROR;
+            }
+            bitmaps.push_back(bmp);
+        }
+
+        mtmd_input_text text{prompt.c_str(), prompt.size(), true, true};
+        chunks = mtmd_input_chunks_init();
+        int32_t rc = mtmd_tokenize(s->mctx, chunks, &text,
+                                   const_cast<const mtmd_bitmap **>(bitmaps.data()), bitmaps.size());
+        for (auto *b : bitmaps) mtmd_bitmap_free(b);
+        if (rc != 0) {
+            LOGE("mtmd_tokenize вернул %d", rc);
+            mtmd_input_chunks_free(chunks);
+            return RES_MEDIA_ERROR;
+        }
+        for (size_t i = 0; i < mtmd_input_chunks_size(chunks); ++i) {
+            const mtmd_input_chunk *ch = mtmd_input_chunks_get(chunks, i);
+            Piece p;
+            p.chunk = ch;
+            if (mtmd_input_chunk_get_type(ch) == MTMD_INPUT_CHUNK_TYPE_TEXT) {
+                size_t nt = 0;
+                const llama_token *toks = mtmd_input_chunk_get_tokens_text(ch, &nt);
+                if (nt == 0) continue;
+                p.tokens.assign(toks, toks + nt);
+                p.n_pos = (llama_pos) nt;
+            } else {
+                p.media = true;
+                const char *id = mtmd_input_chunk_get_id(ch);
+                p.id = id ? id : "";
+                p.n_pos = mtmd_input_chunk_get_n_pos(ch);
+            }
+            pieces.push_back(std::move(p));
+        }
+    } else {
+        if (n_images > 0) return RES_MEDIA_ERROR; // модель не видит картинки
+        Piece p;
+        p.tokens = tokenize(s->vocab, prompt);
+        p.n_pos = (llama_pos) p.tokens.size();
+        if (!p.tokens.empty()) pieces.push_back(std::move(p));
     }
-    if (common == tokens.size()) --common; // хотя бы один токен нужно прогнать для логитов
+
+    auto finish = [&](int code) {
+        if (chunks) mtmd_input_chunks_free(chunks);
+        for (auto &p : s->cached) p.chunk = nullptr;
+        return code;
+    };
+
+    if (pieces.empty()) return finish(RES_TEMPLATE_ERROR);
+    llama_pos total_pos = 0;
+    for (auto &p : pieces) total_pos += p.n_pos;
+    // Оставляем запас хотя бы на короткий ответ
+    if (total_pos + 64 >= s->n_ctx) return finish(RES_CONTEXT_FULL);
+
+    // --- 3. Ищем совпадающее начало с тем, что уже в KV-кэше ---
+    size_t first = 0;       // первый кусок, который нужно прогнать
+    size_t skip_tokens = 0; // сколько токенов этого куска уже в кэше
+    llama_pos pos = 0;
+    for (; first < pieces.size() && first < s->cached.size(); ++first) {
+        const Piece &a = pieces[first];
+        const Piece &b = s->cached[first];
+        if (a.media != b.media) break;
+        if (a.media) {
+            if (!a.id.empty() && a.id == b.id && a.n_pos == b.n_pos) { pos += a.n_pos; continue; }
+            break;
+        }
+        size_t k = 0;
+        while (k < a.tokens.size() && k < b.tokens.size() && a.tokens[k] == b.tokens[k]) ++k;
+        if (k == a.tokens.size() && k == b.tokens.size()) { pos += (llama_pos) k; continue; }
+        skip_tokens = k;
+        pos += (llama_pos) k;
+        break;
+    }
+    if (first >= pieces.size()) {
+        // Всё уже в кэше — перепрогоняем последний токен, чтобы получить логиты
+        first = pieces.size() - 1;
+        Piece &last = pieces[first];
+        if (last.media) {
+            skip_tokens = 0;
+            pos -= last.n_pos;
+        } else {
+            skip_tokens = last.tokens.size() - 1;
+            pos -= 1;
+        }
+    }
+    if (skip_tokens > 0 && first < pieces.size() && skip_tokens >= pieces[first].tokens.size()) {
+        skip_tokens = pieces[first].tokens.size() - 1;
+    }
 
     llama_memory_t mem = llama_get_memory(s->ctx);
-    if (common < s->cached.size()) {
-        if (!llama_memory_seq_rm(mem, 0, (llama_pos) common, -1)) {
+    if (pos < s->n_past) {
+        if (!llama_memory_seq_rm(mem, 0, pos, -1)) {
             // Некоторые архитектуры (рекуррентные) не умеют частичное удаление
             llama_memory_clear(mem, true);
-            common = 0;
+            first = 0;
+            skip_tokens = 0;
+            pos = 0;
         }
-        s->cached.resize(common);
     }
+    s->cached.clear();
+    s->n_past = 0;
 
-    // --- 3. Обрабатываем новую часть промпта пакетами ---
-    for (size_t i = common; i < tokens.size(); i += s->n_batch) {
-        int32_t cnt = (int32_t) std::min<size_t>(s->n_batch, tokens.size() - i);
-        llama_batch batch = llama_batch_get_one(tokens.data() + i, cnt);
-        int rc = llama_decode(s->ctx, batch);
+    // --- 4. Прогоняем новую часть промпта ---
+    for (size_t i = first; i < pieces.size(); ++i) {
+        Piece &p = pieces[i];
+        bool last = i + 1 == pieces.size();
+        int rc;
+        if (p.media) {
+            llama_pos new_pos = pos;
+            rc = mtmd_helper_eval_chunk_single(s->mctx, s->ctx, p.chunk, pos, 0, s->n_batch, last, &new_pos);
+            pos = new_pos;
+        } else {
+            size_t from = (i == first) ? skip_tokens : 0;
+            rc = decode_tokens(s, p.tokens.data() + from, (int) (p.tokens.size() - from), pos, last);
+            pos += (llama_pos) (p.tokens.size() - from);
+        }
         if (rc != 0) {
             clear_cache(s);
-            if (rc == 2 || g_abort.load()) return 0; // остановлено пользователем
-            LOGE("llama_decode (prompt) вернул %d", rc);
-            return rc == 1 ? RES_CONTEXT_FULL : RES_DECODE_ERROR;
+            if (rc == 2 || g_abort.load()) return finish(0); // остановлено пользователем
+            LOGE("Ошибка обработки промпта: %d", rc);
+            return finish(rc == 1 ? RES_CONTEXT_FULL : RES_DECODE_ERROR);
         }
-        s->cached.insert(s->cached.end(), tokens.begin() + i, tokens.begin() + i + cnt);
     }
+    for (auto &p : pieces) p.chunk = nullptr;
+    s->cached = pieces;
+    s->n_past = pos;
 
-    // --- 4. Сэмплер ---
+    // --- 5. Сэмплер ---
     llama_sampler_chain_params sp = llama_sampler_chain_default_params();
     llama_sampler *smpl = llama_sampler_chain_init(sp);
     if (temperature <= 0.0f) {
@@ -339,7 +524,7 @@ Java_com_neuropocket_app_engine_LlamaNative_generate(
     jclass cbCls = env->GetObjectClass(callback);
     jmethodID onToken = env->GetMethodID(cbCls, "onToken", "([B)Z");
 
-    // --- 5. Цикл генерации ---
+    // --- 6. Цикл генерации ---
     std::string pending;
     int generated = 0;
     int result = 0;
@@ -366,12 +551,11 @@ Java_com_neuropocket_app_engine_LlamaNative_generate(
         ++generated;
         if (!emit(false)) break;
 
-        if ((int) s->cached.size() + 1 >= s->n_ctx) {
+        if (s->n_past + 1 >= s->n_ctx) {
             result = RES_CONTEXT_FULL;
             break;
         }
-        llama_batch batch = llama_batch_get_one(&tok, 1);
-        int rc = llama_decode(s->ctx, batch);
+        int rc = decode_tokens(s, &tok, 1, s->n_past, true);
         if (rc != 0) {
             clear_cache(s);
             if (rc != 2 && !g_abort.load()) {
@@ -380,14 +564,22 @@ Java_com_neuropocket_app_engine_LlamaNative_generate(
             }
             break;
         }
-        s->cached.push_back(tok);
+        s->n_past += 1;
+        if (!s->cached.empty() && !s->cached.back().media) {
+            s->cached.back().tokens.push_back(tok);
+            s->cached.back().n_pos += 1;
+        } else {
+            Piece p;
+            p.tokens.push_back(tok);
+            p.n_pos = 1;
+            s->cached.push_back(std::move(p));
+        }
     }
     emit(true);
 
     llama_sampler_free(smpl);
     env->DeleteLocalRef(cbCls);
-    // Если контекст закончился посреди ответа — всё равно отдаём текст,
-    // а Kotlin-сторона покажет предупреждение.
+    finish(0);
     return result == 0 ? generated : result;
 }
 

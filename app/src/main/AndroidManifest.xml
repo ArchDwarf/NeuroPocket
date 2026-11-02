@@ -3,9 +3,14 @@
 
     <!-- Интернет нужен только для скачивания моделей. Сама нейросеть работает офлайн. -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Сохранение картинок в галерею на Android 9 (на новых версиях не нужно) -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
 
     <application
         android:allowBackup="false"
+        android:largeHeap="true"
         android:extractNativeLibs="true"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"

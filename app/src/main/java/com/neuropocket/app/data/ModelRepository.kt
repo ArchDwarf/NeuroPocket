@@ -17,7 +17,12 @@ data class LocalModel(
     val path: String,
     val sizeBytes: Long,
     val parts: Int,
-)
+    val kind: ModelKind,
+    /** Модуль зрения (mmproj) — если есть, модель понимает фото и видео. */
+    val mmprojPath: String? = null,
+) {
+    val hasVision: Boolean get() = mmprojPath != null
+}
 
 data class DownloadInfo(
     val id: Long,
@@ -35,6 +40,9 @@ data class DownloadInfo(
  * Хранение моделей на устройстве: список, скачивание через системный
  * DownloadManager (работает в фоне, продолжает после обрыва сети),
  * импорт файла из памяти телефона и удаление.
+ *
+ * Чат-модели лежат в models/, модуль зрения — рядом, как «<модель>.gguf.mmproj».
+ * Модели для картинок лежат в sd_models/.
  */
 class ModelRepository(private val context: Context) {
 
@@ -42,8 +50,13 @@ class ModelRepository(private val context: Context) {
     private val prefs = context.getSharedPreferences("downloads", Context.MODE_PRIVATE)
     private val splitRegex = Regex("^(.*)-(\\d{5})-of-(\\d{5})\\.gguf$", RegexOption.IGNORE_CASE)
 
-    val modelsDir: File
-        get() = (context.getExternalFilesDir(DIR) ?: File(context.filesDir, DIR)).also { it.mkdirs() }
+    private fun dir(name: String): File =
+        (context.getExternalFilesDir(name) ?: File(context.filesDir, name)).also { it.mkdirs() }
+
+    val modelsDir: File get() = dir(DIR_CHAT)
+    val imageModelsDir: File get() = dir(DIR_IMAGE)
+
+    fun dirFor(kind: ModelKind): File = if (kind == ModelKind.CHAT) modelsDir else imageModelsDir
 
     // ---------- Установленные модели ----------
 
@@ -53,8 +66,9 @@ class ModelRepository(private val context: Context) {
         val result = mutableListOf<LocalModel>()
         for (f in files) {
             val m = splitRegex.matchEntire(f.name)
+            val mmproj = File(modelsDir, f.name + MMPROJ_SUFFIX).takeIf { it.exists() }?.absolutePath
             if (m == null) {
-                result += LocalModel(f.name, f.absolutePath, f.length(), 1)
+                result += LocalModel(f.name, f.absolutePath, f.length(), 1, ModelKind.CHAT, mmproj)
             } else if (m.groupValues[2] == "00001") {
                 val siblings = files.filter { it.name.startsWith(m.groupValues[1] + "-") && splitRegex.matches(it.name) }
                 result += LocalModel(
@@ -62,16 +76,27 @@ class ModelRepository(private val context: Context) {
                     path = f.absolutePath,
                     sizeBytes = siblings.sumOf { it.length() },
                     parts = siblings.size,
+                    kind = ModelKind.CHAT,
+                    mmprojPath = mmproj,
                 )
             }
         }
         return result.sortedBy { it.name.lowercase() }
     }
 
+    fun installedImageModels(): List<LocalModel> {
+        val files = imageModelsDir.listFiles { f ->
+            f.isFile && IMAGE_EXT.any { f.name.endsWith(it, true) }
+        } ?: return emptyList()
+        return files.map { LocalModel(it.name, it.absolutePath, it.length(), 1, ModelKind.IMAGE) }
+            .sortedBy { it.name.lowercase() }
+    }
+
     fun delete(model: LocalModel) {
         val file = File(model.path)
+        model.mmprojPath?.let { File(it).delete() }
         val m = splitRegex.matchEntire(file.name)
-        if (m == null) {
+        if (model.kind == ModelKind.IMAGE || m == null) {
             file.delete()
         } else {
             modelsDir.listFiles()?.filter { it.name.startsWith(m.groupValues[1] + "-") }?.forEach { it.delete() }
@@ -80,31 +105,43 @@ class ModelRepository(private val context: Context) {
 
     // ---------- Скачивание ----------
 
+    /** id загрузки → "папка/имя файла" */
     private fun tracked(): MutableMap<Long, String> {
         val json = JSONObject(prefs.getString("map", "{}") ?: "{}")
-        return json.keys().asSequence().associate { it.toLong() to json.getString(it) }.toMutableMap()
+        return json.keys().asSequence().associate { key ->
+            val v = json.getString(key)
+            key.toLong() to (if ('/' in v) v else "$DIR_CHAT/$v")
+        }.toMutableMap()
     }
 
     private fun saveTracked(map: Map<Long, String>) = prefs.edit {
         putString("map", JSONObject(map.mapKeys { it.key.toString() }).toString())
     }
 
-    /** Ставит в очередь все части модели. */
+    private fun targetFile(rel: String): File = File(dir(rel.substringBefore('/')), rel.substringAfter('/'))
+
+    /** Ставит в очередь все части модели и её модуль зрения. */
     fun enqueue(file: HfModelFile, hfToken: String) {
         val map = tracked()
-        for (path in file.parts) {
-            val name = path.substringAfterLast('/')
-            if (File(modelsDir, name).exists() || map.containsValue(name)) continue
-            File(modelsDir, "$name.part").delete()
+        val dirName = if (file.kind == ModelKind.CHAT) DIR_CHAT else DIR_IMAGE
+        val jobs = mutableListOf<Pair<String, String>>() // путь в репо → имя файла
+        file.parts.forEach { jobs += it to it.substringAfterLast('/') }
+        if (file.mmproj != null) {
+            jobs += file.mmproj to file.parts.first().substringAfterLast('/') + MMPROJ_SUFFIX
+        }
+        for ((path, name) in jobs) {
+            val rel = "$dirName/$name"
+            if (targetFile(rel).exists() || map.containsValue(rel)) continue
+            File(dir(dirName), "$name.part").delete()
             val req = DownloadManager.Request(HuggingFace.downloadUrl(file.repo, path).toUri())
                 .setTitle(name)
                 .setDescription("Модель для NeuroPocket")
                 .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
                 .setAllowedOverMetered(true)
                 .setAllowedOverRoaming(true)
-                .setDestinationInExternalFilesDir(context, DIR, "$name.part")
+                .setDestinationInExternalFilesDir(context, dirName, "$name.part")
             if (hfToken.isNotBlank()) req.addRequestHeader("Authorization", "Bearer ${hfToken.trim()}")
-            map[dm.enqueue(req)] = name
+            map[dm.enqueue(req)] = rel
         }
         saveTracked(map)
     }
@@ -112,12 +149,12 @@ class ModelRepository(private val context: Context) {
     fun cancel(id: Long) {
         dm.remove(id)
         val map = tracked()
-        map.remove(id)?.let { File(modelsDir, "$it.part").delete() }
+        map.remove(id)?.let { File(targetFile(it).path + ".part").delete() }
         saveTracked(map)
     }
 
     /**
-     * Проверяет состояние загрузок: завершённые переименовывает в .gguf,
+     * Проверяет состояние загрузок: завершённые переименовывает,
      * неудачные удаляет. Возвращает активные загрузки и сообщения об ошибках.
      */
     fun syncDownloads(): Pair<List<DownloadInfo>, List<String>> {
@@ -136,19 +173,19 @@ class ModelRepository(private val context: Context) {
             val reasonCol = c.getColumnIndexOrThrow(DownloadManager.COLUMN_REASON)
             while (c.moveToNext()) {
                 val id = c.getLong(idCol)
-                val name = map[id] ?: continue
+                val rel = map[id] ?: continue
+                val target = targetFile(rel)
+                val part = File(target.path + ".part")
                 seen += id
                 when (c.getInt(statusCol)) {
                     DownloadManager.STATUS_SUCCESSFUL -> {
-                        val part = File(modelsDir, "$name.part")
-                        if (!part.renameTo(File(modelsDir, name))) errors += "Не удалось сохранить $name"
+                        if (!part.renameTo(target)) errors += "Не удалось сохранить ${target.name}"
                         map.remove(id)
                     }
                     DownloadManager.STATUS_FAILED -> {
-                        val reason = c.getInt(reasonCol)
-                        errors += "Ошибка загрузки $name (${failReason(reason)})"
+                        errors += "Ошибка загрузки ${target.name} (${failReason(c.getInt(reasonCol))})"
                         dm.remove(id)
-                        File(modelsDir, "$name.part").delete()
+                        part.delete()
                         map.remove(id)
                     }
                     else -> {
@@ -157,13 +194,13 @@ class ModelRepository(private val context: Context) {
                             DownloadManager.STATUS_PAUSED -> DownloadInfo.Status.PAUSED
                             else -> DownloadInfo.Status.QUEUED
                         }
-                        active += DownloadInfo(id, name, c.getLong(soFarCol), c.getLong(totalCol), status)
+                        active += DownloadInfo(id, target.name, c.getLong(soFarCol), c.getLong(totalCol), status)
                     }
                 }
             }
         }
         // Загрузки, отменённые из шторки уведомлений, исчезают из DownloadManager
-        (map.keys - seen).forEach { id -> map.remove(id)?.let { File(modelsDir, "$it.part").delete() } }
+        (map.keys - seen).forEach { id -> map.remove(id)?.let { File(targetFile(it).path + ".part").delete() } }
         saveTracked(map)
         return active to errors
     }
@@ -179,32 +216,31 @@ class ModelRepository(private val context: Context) {
 
     // ---------- Импорт из памяти телефона ----------
 
-    /** Копирует выбранный пользователем .gguf в папку моделей. */
-    suspend fun import(uri: Uri, onProgress: (Float) -> Unit): LocalModel = withContext(Dispatchers.IO) {
-        val resolver = context.contentResolver
-        var name = "model.gguf"
+    private fun displayName(uri: Uri): Pair<String, Long> {
+        var name = "model"
         var size = -1L
-        resolver.query(uri, null, null, null, null)?.use { c ->
+        context.contentResolver.query(uri, null, null, null, null)?.use { c ->
             if (c.moveToFirst()) {
                 c.getColumnIndex(OpenableColumns.DISPLAY_NAME).takeIf { it >= 0 }?.let { name = c.getString(it) ?: name }
                 c.getColumnIndex(OpenableColumns.SIZE).takeIf { it >= 0 && !c.isNull(it) }?.let { size = c.getLong(it) }
             }
         }
-        name = name.replace(Regex("[/\\\\:*?\"<>|]"), "_")
-        if (!name.endsWith(".gguf", true)) name += ".gguf"
+        return name.replace(Regex("[/\\\\:*?\"<>|]"), "_") to size
+    }
 
-        val target = File(modelsDir, name)
-        val tmp = File(modelsDir, "$name.import")
+    private fun copy(uri: Uri, target: File, size: Long, checkGguf: Boolean, onProgress: (Float) -> Unit) {
+        val tmp = File(target.path + ".import")
         try {
-            resolver.openInputStream(uri)?.use { input ->
-                val magic = ByteArray(4)
-                if (input.read(magic) != 4 || String(magic, Charsets.US_ASCII) != "GGUF") {
-                    throw IOException("Это не GGUF-файл. Поддерживаются модели в формате .gguf")
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                val head = ByteArray(4)
+                val read = input.read(head)
+                if (checkGguf && (read != 4 || String(head, Charsets.US_ASCII) != "GGUF")) {
+                    throw IOException("Это не GGUF-файл. Чат-модели поддерживаются в формате .gguf")
                 }
                 tmp.outputStream().use { out ->
-                    out.write(magic)
+                    if (read > 0) out.write(head, 0, read)
                     val buf = ByteArray(1 shl 20)
-                    var copied = 4L
+                    var copied = read.toLong().coerceAtLeast(0)
                     while (true) {
                         val n = input.read(buf)
                         if (n < 0) break
@@ -220,10 +256,37 @@ class ModelRepository(private val context: Context) {
             tmp.delete()
             throw e
         }
-        LocalModel(target.name, target.absolutePath, target.length(), 1)
     }
 
+    /** Копирует выбранный пользователем файл модели в папку моделей. */
+    suspend fun import(uri: Uri, kind: ModelKind, onProgress: (Float) -> Unit): LocalModel =
+        withContext(Dispatchers.IO) {
+            var (name, size) = displayName(uri)
+            if (kind == ModelKind.CHAT) {
+                if (name.contains("mmproj", ignoreCase = true)) {
+                    throw IOException("Это модуль зрения (mmproj). Подключите его через меню модели «Подключить зрение».")
+                }
+                if (!name.endsWith(".gguf", true)) name += ".gguf"
+            } else if (IMAGE_EXT.none { name.endsWith(it, true) }) {
+                throw IOException("Поддерживаются файлы .safetensors, .ckpt и .gguf")
+            }
+            val target = File(dirFor(kind), name)
+            copy(uri, target, size, checkGguf = kind == ModelKind.CHAT, onProgress)
+            LocalModel(target.name, target.absolutePath, target.length(), 1, kind)
+        }
+
+    /** Подключает к чат-модели файл модуля зрения (mmproj-*.gguf). */
+    suspend fun importMmproj(model: LocalModel, uri: Uri, onProgress: (Float) -> Unit) =
+        withContext(Dispatchers.IO) {
+            val (_, size) = displayName(uri)
+            val target = File(File(model.path).parentFile, File(model.path).name + MMPROJ_SUFFIX)
+            copy(uri, target, size, checkGguf = true, onProgress)
+        }
+
     companion object {
-        const val DIR = "models"
+        const val DIR_CHAT = "models"
+        const val DIR_IMAGE = "sd_models"
+        const val MMPROJ_SUFFIX = ".mmproj"
+        val IMAGE_EXT = listOf(".safetensors", ".ckpt", ".gguf")
     }
 }

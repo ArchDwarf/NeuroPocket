@@ -16,6 +16,7 @@ internal object LlamaNative {
     const val RES_CONTEXT_FULL = -2
     const val RES_DECODE_ERROR = -3
     const val RES_BAD_HANDLE = -4
+    const val RES_MEDIA_ERROR = -5
 
     init {
         System.loadLibrary("neuropocket")
@@ -23,7 +24,9 @@ internal object LlamaNative {
 
     external fun init(nativeLibDir: String)
     external fun systemInfo(): String
-    external fun load(path: String, nCtx: Int, nThreads: Int): Long
+    external fun mediaMarker(): String
+    external fun load(path: String, mmprojPath: String?, nCtx: Int, nThreads: Int): Long
+    external fun hasVision(handle: Long): Boolean
     external fun free(handle: Long)
     external fun modelInfo(handle: Long): String
     external fun resetChat(handle: Long)
@@ -32,6 +35,10 @@ internal object LlamaNative {
         handle: Long,
         roles: Array<String>,
         contents: Array<String>,
+        images: Array<ByteArray>,
+        widths: IntArray,
+        heights: IntArray,
+        imageIds: Array<String>,
         temperature: Float,
         topP: Float,
         topK: Int,

@@ -13,6 +13,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -92,6 +93,39 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier) {
                 draft.threads.toFloat(), 1f..cores.toFloat(), (cores - 2).coerceAtLeast(0),
             ) { draft = draft.copy(threads = it.roundToInt()) }
 
+            Header("Фото и видео (модели со зрением)")
+            LabeledSlider(
+                "Размер фото для модели", "${draft.visionMaxSide} px",
+                draft.visionMaxSide.toFloat(), 384f..1280f, 6,
+            ) { draft = draft.copy(visionMaxSide = ((it / 128).roundToInt() * 128).coerceIn(384, 1280)) }
+            LabeledSlider(
+                "Кадров из видео", "${draft.videoFrames}",
+                draft.videoFrames.toFloat(), 2f..16f, 13,
+            ) { draft = draft.copy(videoFrames = it.roundToInt()) }
+            Text(
+                "Меньше размер и кадров — быстрее ответ. Каждый кадр обрабатывается как отдельное фото.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            Header("Генерация картинок")
+            Text("Сжатие весов при загрузке модели", style = MaterialTheme.typography.bodyMedium)
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                listOf("" to "как в файле", "f16" to "F16", "q8_0" to "Q8", "q4_0" to "Q4").forEach { (k, t) ->
+                    FilterChip(
+                        selected = draft.imageWeightType == k,
+                        onClick = { draft = draft.copy(imageWeightType = k) },
+                        label = { Text(t) },
+                    )
+                }
+            }
+            Text(
+                "Q8/Q4 уменьшают расход памяти большими моделями (немного хуже качество). " +
+                    "Применяется при следующей загрузке модели.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
             Header("Hugging Face")
             OutlinedTextField(
                 value = draft.hfToken,
@@ -106,11 +140,22 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier) {
             Spacer(Modifier.height(12.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
-                    onClick = { vm.updateSettings(draft.copy(activeModelPath = vm.settings.activeModelPath)) },
+                    onClick = {
+                        vm.updateSettings(
+                            draft.copy(
+                                activeModelPath = vm.settings.activeModelPath,
+                                imageModelPath = vm.settings.imageModelPath,
+                            )
+                        )
+                    },
                     enabled = draft != vm.settings,
                 ) { Text("Сохранить") }
                 OutlinedButton(onClick = {
-                    draft = Settings(hfToken = draft.hfToken, activeModelPath = vm.settings.activeModelPath)
+                    draft = Settings(
+                        hfToken = draft.hfToken,
+                        activeModelPath = vm.settings.activeModelPath,
+                        imageModelPath = vm.settings.imageModelPath,
+                    )
                 }) { Text("По умолчанию") }
             }
 

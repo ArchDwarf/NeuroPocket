@@ -10,14 +10,14 @@ android {
 
     defaultConfig {
         applicationId = "com.neuropocket.app"
-        minSdk = 26
+        minSdk = 28
         targetSdk = 36
         versionCode = 1
         versionName = "1.0"
 
         ndk {
-            // arm64-v8a — почти все современные телефоны; x86_64 — эмулятор
-            abiFilters += listOf("arm64-v8a", "x86_64")
+            // Только arm64-v8a: это все современные телефоны (сборка в 2 раза быстрее)
+            abiFilters += listOf("arm64-v8a")
         }
         externalNativeBuild {
             cmake {
@@ -47,6 +47,8 @@ android {
         // CPU-бэкенды ggml загружаются динамически из nativeLibraryDir,
         // поэтому .so-файлы должны быть распакованы при установке.
         jniLibs.useLegacyPackaging = true
+        // libc++_shared.so есть и в :app, и в :sdengine — берём один
+        jniLibs.pickFirsts += "**/libc++_shared.so"
     }
 
     compileOptions {
@@ -65,6 +67,7 @@ kotlin {
 }
 
 dependencies {
+    implementation(project(":sdengine"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.lifecycle.runtime.ktx)

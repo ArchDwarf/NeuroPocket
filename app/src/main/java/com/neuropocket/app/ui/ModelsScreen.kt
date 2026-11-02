@@ -4,6 +4,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -21,13 +22,15 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -35,7 +38,9 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -53,7 +58,11 @@ import androidx.compose.ui.unit.dp
 import com.neuropocket.app.data.DownloadInfo
 import com.neuropocket.app.data.HfModelFile
 import com.neuropocket.app.data.LocalModel
-import com.neuropocket.app.data.SUGGESTED_MODELS
+import com.neuropocket.app.data.ModelKind
+import com.neuropocket.app.data.SUGGESTED_CHAT
+import com.neuropocket.app.data.SUGGESTED_IMAGE
+import com.neuropocket.app.data.SUGGESTED_VISION
+import com.neuropocket.app.data.Suggested
 import java.util.Locale
 
 fun formatSize(bytes: Long): String = when {
@@ -81,8 +90,15 @@ fun ModelsScreen(vm: MainViewModel, modifier: Modifier) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ModelsHome(vm: MainViewModel, modifier: Modifier) {
+    val kind = vm.browseKind
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) vm.importModel(uri)
+        if (uri != null) vm.importModel(uri, kind)
+    }
+    var mmprojTarget by remember { mutableStateOf<LocalModel?>(null) }
+    val mmprojLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        val target = mmprojTarget
+        if (uri != null && target != null) vm.importMmproj(target, uri)
+        mmprojTarget = null
     }
     var toDelete by remember { mutableStateOf<LocalModel?>(null) }
 
@@ -97,6 +113,15 @@ private fun ModelsHome(vm: MainViewModel, modifier: Modifier) {
                 }
             },
         )
+        PrimaryTabRow(selectedTabIndex = kind.ordinal) {
+            Tab(selected = kind == ModelKind.CHAT, onClick = { vm.switchKind(ModelKind.CHAT) },
+                text = { Text("Чат и зрение") })
+            Tab(selected = kind == ModelKind.IMAGE, onClick = { vm.switchKind(ModelKind.IMAGE) },
+                text = { Text("Картинки") })
+        }
+        val installed = if (kind == ModelKind.CHAT) vm.installed else vm.installedImage
+        val activePath = if (kind == ModelKind.CHAT) vm.settings.activeModelPath else vm.settings.imageModelPath
+
         LazyColumn(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -111,21 +136,30 @@ private fun ModelsHome(vm: MainViewModel, modifier: Modifier) {
                     }
                 }
             }
-            if (vm.installed.isEmpty() && vm.downloads.isEmpty()) {
+            if (installed.isEmpty() && vm.downloads.isEmpty()) {
                 item {
                     Text(
-                        "Пока нет моделей. Скачайте одну из списка ниже, найдите любую на " +
-                            "Hugging Face или добавьте .gguf-файл из памяти телефона.",
+                        if (kind == ModelKind.CHAT)
+                            "Пока нет моделей. Скачайте одну из списка ниже, найдите любую на " +
+                                "Hugging Face или добавьте .gguf-файл из памяти телефона."
+                        else
+                            "Пока нет моделей для картинок. Скачайте одну из рекомендуемых или добавьте " +
+                                "однофайловую модель Stable Diffusion (.safetensors / .ckpt / .gguf).",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
-            items(vm.installed, key = { "local:" + it.path }) { model ->
+            items(installed, key = { "local:" + it.path }) { model ->
                 InstalledCard(
                     model = model,
-                    active = vm.settings.activeModelPath == model.path,
-                    onSelect = { vm.selectModel(model) },
+                    active = activePath == model.path,
+                    onSelect = {
+                        if (kind == ModelKind.CHAT) vm.selectModel(model) else vm.studio.select(model)
+                    },
                     onDelete = { toDelete = model },
+                    onAttachVision = if (kind == ModelKind.CHAT) {
+                        { mmprojTarget = model; mmprojLauncher.launch(arrayOf("*/*")) }
+                    } else null,
                 )
             }
             items(vm.downloads, key = { "dl:" + it.id }) { dl ->
@@ -145,9 +179,22 @@ private fun ModelsHome(vm: MainViewModel, modifier: Modifier) {
             }
 
             // ----- Рекомендуемые -----
-            section("Рекомендуемые для телефона")
-            items(SUGGESTED_MODELS, key = { "s:" + it.repo }) { s ->
-                RepoRow(title = s.title, subtitle = "${s.note}\n${s.repo}") { vm.openRepository(s.repo) }
+            if (kind == ModelKind.CHAT) {
+                section("Видят фото и видео")
+                suggested(SUGGESTED_VISION, vm)
+                section("Текстовые для телефона")
+                suggested(SUGGESTED_CHAT, vm)
+            } else {
+                item {
+                    Text(
+                        "Модели Stable Diffusion понимают описания на английском. " +
+                            "Генерация занимает от нескольких секунд (SDXS) до пары минут (SD 1.5).",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                section("Рекомендуемые")
+                suggested(SUGGESTED_IMAGE, vm)
             }
         }
     }
@@ -162,6 +209,12 @@ private fun ModelsHome(vm: MainViewModel, modifier: Modifier) {
             },
             dismissButton = { TextButton(onClick = { toDelete = null }) { Text("Отмена") } },
         )
+    }
+}
+
+private fun LazyListScope.suggested(list: List<Suggested>, vm: MainViewModel) {
+    items(list, key = { "s:" + it.repo }) { s ->
+        RepoRow(title = s.title, subtitle = "${s.note}\n${s.repo}") { vm.openRepository(s.repo, s.kind) }
     }
 }
 
@@ -184,7 +237,14 @@ private fun CenteredProgress() {
 }
 
 @Composable
-private fun InstalledCard(model: LocalModel, active: Boolean, onSelect: () -> Unit, onDelete: () -> Unit) {
+private fun InstalledCard(
+    model: LocalModel,
+    active: Boolean,
+    onSelect: () -> Unit,
+    onDelete: () -> Unit,
+    onAttachVision: (() -> Unit)?,
+) {
+    var menu by remember { mutableStateOf(false) }
     Card(
         onClick = onSelect,
         colors = if (active) CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
@@ -193,15 +253,30 @@ private fun InstalledCard(model: LocalModel, active: Boolean, onSelect: () -> Un
         Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
             RadioButton(selected = active, onClick = onSelect)
             Column(Modifier.weight(1f)) {
-                Text(model.name, fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                val parts = if (model.parts > 1) " · ${model.parts} части" else ""
                 Text(
-                    formatSize(model.sizeBytes) + parts,
+                    (if (model.hasVision) "👁 " else "") + model.name,
+                    fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                )
+                val parts = if (model.parts > 1) " · ${model.parts} части" else ""
+                val vision = if (model.hasVision) " · видит фото и видео" else ""
+                Text(
+                    formatSize(model.sizeBytes) + parts + vision,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            IconButton(onClick = onDelete) { Icon(Icons.Default.Delete, "Удалить") }
+            Box {
+                IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "Действия") }
+                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                    if (onAttachVision != null) {
+                        DropdownMenuItem(
+                            text = { Text(if (model.hasVision) "Заменить модуль зрения (mmproj)" else "Подключить зрение (mmproj)") },
+                            onClick = { menu = false; onAttachVision() },
+                        )
+                    }
+                    DropdownMenuItem(text = { Text("Удалить") }, onClick = { menu = false; onDelete() })
+                }
+            }
         }
     }
 }
@@ -247,7 +322,10 @@ private fun SearchBox(vm: MainViewModel) {
         onValueChange = { vm.searchQuery = it },
         modifier = Modifier.fillMaxWidth(),
         singleLine = true,
-        placeholder = { Text("qwen, llama, gemma… или автор/репозиторий") },
+        placeholder = {
+            Text(if (vm.browseKind == ModelKind.CHAT) "qwen, llama, gemma… или автор/репозиторий"
+            else "stable diffusion, sdxl… или автор/репозиторий")
+        },
         trailingIcon = { IconButton(onClick = { go() }) { Icon(Icons.Default.Search, "Искать") } },
         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
         keyboardActions = KeyboardActions(onSearch = { go() }),
@@ -272,7 +350,9 @@ private fun RepoRow(title: String, subtitle: String, onClick: () -> Unit) {
 @Composable
 private fun RepoFilesScreen(vm: MainViewModel, modifier: Modifier) {
     val repo = vm.openRepo ?: return
-    val installedNames = vm.installed.map { it.path.substringAfterLast('/') }.toSet()
+    val kind = vm.openRepoKind
+    val installedNames = (if (kind == ModelKind.CHAT) vm.installed else vm.installedImage)
+        .map { it.path.substringAfterLast('/') }.toSet()
     val downloadingNames = vm.downloads.map { it.fileName }.toSet()
 
     Column(modifier.fillMaxSize()) {
@@ -289,13 +369,26 @@ private fun RepoFilesScreen(vm: MainViewModel, modifier: Modifier) {
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             item {
-                Text(
+                val text = if (kind == ModelKind.CHAT) {
                     "Выберите вариант квантования. Q4_K_M — лучший баланс качества и скорости. " +
-                        "Чем больше файл, тем умнее модель, но медленнее и тем больше нужно памяти. " +
-                        "ОЗУ телефона: ${formatSize(vm.totalRamBytes)}.",
+                        "Чем больше файл, тем умнее модель, но медленнее и тем больше нужно памяти."
+                } else {
+                    "Чем меньше файл (Q4/Q8), тем меньше памяти нужно. Q8_0 почти не уступает оригиналу."
+                }
+                Text(
+                    "$text ОЗУ телефона: ${formatSize(vm.totalRamBytes)}.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+            if (!vm.repoLoading && kind == ModelKind.CHAT && vm.repoFiles.any { it.mmproj != null }) {
+                item {
+                    Text(
+                        "👁 Эта модель видит фото и видео: модуль зрения скачается вместе с ней.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
             }
             if (vm.repoLoading) item { CenteredProgress() }
             vm.repoError?.let { item { Text(it, color = MaterialTheme.colorScheme.error) } }
@@ -316,12 +409,15 @@ private enum class FileState { NONE, DOWNLOADING, INSTALLED }
 
 @Composable
 private fun FileCard(f: HfModelFile, ram: Long, state: FileState, onDownload: () -> Unit) {
-    val tooBig = f.sizeBytes > ram * 0.75
+    // Генерации картинок нужно примерно вдвое больше памяти, чем весит файл
+    val need = if (f.kind == ModelKind.IMAGE) f.totalSize * 2 else f.totalSize
+    val tooBig = need > ram * 0.75
     Card {
         Column(Modifier.fillMaxWidth().padding(12.dp)) {
             Text(f.displayName, fontWeight = FontWeight.Medium)
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(formatSize(f.sizeBytes), style = MaterialTheme.typography.bodySmall)
+                val extra = if (f.mmprojSize > 0) " + ${formatSize(f.mmprojSize)} зрение" else ""
+                Text(formatSize(f.sizeBytes) + extra, style = MaterialTheme.typography.bodySmall)
                 if (f.isRecommendedQuant) {
                     Spacer(Modifier.size(8.dp))
                     AssistChip(onClick = {}, label = { Text("рекомендуется") })
@@ -335,7 +431,7 @@ private fun FileCard(f: HfModelFile, ram: Long, state: FileState, onDownload: ()
             }
             if (tooBig) {
                 Text(
-                    "⚠ Модель больше 75% оперативной памяти — может не запуститься или работать очень медленно.",
+                    "⚠ Может не хватить оперативной памяти — модель не запустится или будет работать очень медленно.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
                 )

@@ -10,13 +10,18 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.neuropocket.app.data.AppSettings
+import com.neuropocket.app.data.Attachment
+import com.neuropocket.app.data.AttachmentKind
 import com.neuropocket.app.data.DownloadInfo
 import com.neuropocket.app.data.HfModelFile
 import com.neuropocket.app.data.HfRepo
 import com.neuropocket.app.data.HuggingFace
 import com.neuropocket.app.data.LocalModel
+import com.neuropocket.app.data.Media
+import com.neuropocket.app.data.ModelKind
 import com.neuropocket.app.data.ModelRepository
 import com.neuropocket.app.data.Settings
+import com.neuropocket.app.engine.ChatImage
 import com.neuropocket.app.engine.ChatTurn
 import com.neuropocket.app.engine.GenEvent
 import com.neuropocket.app.engine.LlamaEngine
@@ -39,6 +44,7 @@ data class ChatMessage(
     val id: Long,
     val role: Role,
     val text: String,
+    val attachments: List<Attachment> = emptyList(),
     val stats: String? = null,
     val isError: Boolean = false,
 )
@@ -46,7 +52,7 @@ data class ChatMessage(
 sealed interface ModelState {
     data object None : ModelState
     data class Loading(val name: String) : ModelState
-    data class Ready(val name: String, val info: String) : ModelState
+    data class Ready(val name: String, val info: String, val hasVision: Boolean = false) : ModelState
     data class Error(val name: String, val message: String) : ModelState
 }
 
@@ -60,6 +66,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val totalRamBytes: Long = app.getSystemService(ActivityManager::class.java)
         .let { am -> ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }.totalMem }
 
+    /** На телефонах с малым объёмом памяти чат-модель и модель картинок не держим одновременно. */
+    private val lowMemory: Boolean get() = totalRamBytes < 11L * 1024 * 1024 * 1024
+
     private val _toasts = Channel<String>(Channel.BUFFERED)
     val toasts = _toasts.receiveAsFlow()
 
@@ -67,26 +76,48 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ----- Модели -----
     var installed by mutableStateOf<List<LocalModel>>(emptyList()); private set
+    var installedImage by mutableStateOf<List<LocalModel>>(emptyList()); private set
     var downloads by mutableStateOf<List<DownloadInfo>>(emptyList()); private set
     var modelState by mutableStateOf<ModelState>(ModelState.None); private set
     var importProgress by mutableStateOf<Float?>(null); private set
 
     // ----- Каталог Hugging Face -----
+    var browseKind by mutableStateOf(ModelKind.CHAT); private set
+
+    fun switchKind(kind: ModelKind) {
+        if (kind == browseKind) return
+        browseKind = kind
+        searchResults = emptyList()
+        searchError = null
+    }
     var searchQuery by mutableStateOf("")
     var searchResults by mutableStateOf<List<HfRepo>>(emptyList()); private set
     var searchLoading by mutableStateOf(false); private set
     var searchError by mutableStateOf<String?>(null); private set
     var openRepo by mutableStateOf<String?>(null); private set
+    var openRepoKind by mutableStateOf(ModelKind.CHAT); private set
     var repoFiles by mutableStateOf<List<HfModelFile>>(emptyList()); private set
     var repoLoading by mutableStateOf(false); private set
     var repoError by mutableStateOf<String?>(null); private set
 
     // ----- Чат -----
     val messages = mutableStateListOf<ChatMessage>()
+    val pendingAttachments = mutableStateListOf<Attachment>()
+    var attachLoading by mutableStateOf(false); private set
     var isGenerating by mutableStateOf(false); private set
     private var genJob: Job? = null
     /** С какого сообщения начинается контекст (старые отбрасываются, если не влезают). */
     private var contextStart = 0
+
+    // ----- Картинки -----
+    val studio = ImageStudio(
+        app = app,
+        scope = viewModelScope,
+        settings = { settings },
+        saveSettings = { updateSettings(it, reload = false) },
+        toast = ::toast,
+        beforeLoad = ::freeChatIfLowMemory,
+    )
 
     init {
         refreshInstalled()
@@ -103,6 +134,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun refreshInstalled() {
         installed = repo.installedModels()
+        installedImage = repo.installedImageModels()
     }
 
     private suspend fun pollDownloads() {
@@ -113,9 +145,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             errors.forEach { toast(it) }
             val finished = before - active.map { it.fileName }.toSet()
             if (finished.isNotEmpty() || errors.isNotEmpty()) {
+                val prev = installed.find { it.path == settings.activeModelPath }
                 refreshInstalled()
                 if (errors.isEmpty()) toast("Загрузка завершена: ${finished.joinToString()}")
-                if (modelState is ModelState.None) installed.firstOrNull()?.let { selectModel(it) }
+                val now = installed.find { it.path == settings.activeModelPath }
+                when {
+                    modelState is ModelState.None && active.isEmpty() ->
+                        installed.firstOrNull()?.let { selectModel(it) }
+                    // Докачался модуль зрения для текущей модели — перезагружаем
+                    prev != null && now != null && !prev.hasVision && now.hasVision -> loadModel(now.path)
+                }
             }
             delay(if (active.isEmpty()) 3000L else 1000L)
         }
@@ -123,7 +162,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun download(file: HfModelFile) {
         repo.enqueue(file, settings.hfToken)
-        toast("Загрузка начата: ${file.displayName}")
+        val extra = if (file.mmproj != null) " + модуль зрения" else ""
+        toast("Загрузка начата: ${file.displayName}$extra")
         viewModelScope.launch {
             downloads = withContext(Dispatchers.IO) { repo.syncDownloads().first }
         }
@@ -134,15 +174,32 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         downloads = downloads.filterNot { it.id == id }
     }
 
-    fun importModel(uri: Uri) {
+    fun importModel(uri: Uri, kind: ModelKind) {
         if (importProgress != null) return
         importProgress = 0f
         viewModelScope.launch {
             try {
-                val model = repo.import(uri) { p -> importProgress = p }
+                val model = repo.import(uri, kind) { p -> importProgress = p }
                 refreshInstalled()
                 toast("Модель добавлена: ${model.name}")
-                if (modelState !is ModelState.Ready) selectModel(model)
+                if (kind == ModelKind.CHAT && modelState !is ModelState.Ready) selectModel(model)
+            } catch (e: Exception) {
+                toast(e.message ?: "Ошибка импорта")
+            } finally {
+                importProgress = null
+            }
+        }
+    }
+
+    fun importMmproj(model: LocalModel, uri: Uri) {
+        if (importProgress != null) return
+        importProgress = 0f
+        viewModelScope.launch {
+            try {
+                repo.importMmproj(model, uri) { p -> importProgress = p }
+                refreshInstalled()
+                toast("Зрение подключено к ${model.name}")
+                if (settings.activeModelPath == model.path) loadModel(model.path)
             } catch (e: Exception) {
                 toast(e.message ?: "Ошибка импорта")
             } finally {
@@ -158,7 +215,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun deleteModel(model: LocalModel) {
         viewModelScope.launch {
-            if (settings.activeModelPath == model.path) {
+            if (model.kind == ModelKind.IMAGE) {
+                studio.onModelDeleted(model)
+            } else if (settings.activeModelPath == model.path) {
                 stopGeneration()
                 genJob?.join()
                 engine.unload()
@@ -172,17 +231,34 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun loadModel(path: String) {
         val name = File(path).name
+        val mmproj = File(path + ModelRepository.MMPROJ_SUFFIX).takeIf { it.exists() }?.absolutePath
         viewModelScope.launch {
             stopGeneration()
             genJob?.join()
+            if (lowMemory && studio.isModelLoaded) {
+                studio.unload()
+                toast("Модель картинок выгружена, чтобы хватило памяти")
+            }
             modelState = ModelState.Loading(name)
             modelState = try {
-                val info = engine.load(path, settings.contextSize, settings.threads)
+                val loaded = engine.load(path, mmproj, settings.contextSize, settings.threads)
                 contextStart = 0
-                ModelState.Ready(name, info)
+                if (mmproj != null && !loaded.hasVision) toast("Не удалось загрузить модуль зрения — модель работает только с текстом")
+                ModelState.Ready(name, loaded.info, loaded.hasVision)
             } catch (e: Throwable) {
                 ModelState.Error(name, e.message ?: e.toString())
             }
+        }
+    }
+
+    /** Освобождает память под модель картинок на слабых телефонах. */
+    private suspend fun freeChatIfLowMemory() {
+        if (lowMemory && engine.isLoaded) {
+            stopGeneration()
+            genJob?.join()
+            engine.unload()
+            modelState = ModelState.None
+            toast("Чат-модель выгружена, чтобы хватило памяти для картинок")
         }
     }
 
@@ -197,7 +273,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             searchLoading = true
             searchError = null
             try {
-                searchResults = HuggingFace.search(searchQuery, settings.hfToken)
+                searchResults = HuggingFace.search(searchQuery, browseKind, settings.hfToken)
                 if (searchResults.isEmpty()) searchError = "Ничего не найдено"
             } catch (e: Exception) {
                 searchError = "Не удалось выполнить поиск: ${e.message}"
@@ -207,20 +283,25 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun openRepository(id: String) {
+    fun openRepository(id: String, kind: ModelKind = browseKind) {
         val repoId = id.trim().removePrefix("https://huggingface.co/").trim('/')
         if (repoId.count { it == '/' } != 1) {
             toast("Укажите репозиторий в виде автор/название")
             return
         }
         openRepo = repoId
+        openRepoKind = kind
         repoFiles = emptyList()
         repoError = null
         repoLoading = true
         viewModelScope.launch {
             try {
-                repoFiles = HuggingFace.listFiles(repoId, settings.hfToken)
-                if (repoFiles.isEmpty()) repoError = "В репозитории нет GGUF-файлов"
+                repoFiles = HuggingFace.listFiles(repoId, kind, settings.hfToken)
+                if (repoFiles.isEmpty()) {
+                    repoError = if (kind == ModelKind.CHAT) "В репозитории нет GGUF-файлов"
+                    else "Нет подходящих однофайловых моделей (.safetensors / .ckpt / .gguf). " +
+                        "Модели в формате diffusers (по папкам) не поддерживаются."
+                }
             } catch (e: Exception) {
                 repoError = e.message ?: "Ошибка загрузки списка файлов"
             } finally {
@@ -249,14 +330,45 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ===================== Чат =====================
 
+    val canAttach: Boolean get() = (modelState as? ModelState.Ready)?.hasVision == true
+
+    fun attach(uris: List<Uri>) {
+        if (!canAttach) {
+            toast("Эта модель не видит изображения. Выберите модель со значком 👁")
+            return
+        }
+        attachLoading = true
+        viewModelScope.launch {
+            for (uri in uris) {
+                try {
+                    pendingAttachments += Media.loadAttachment(
+                        getApplication(), uri, settings.visionMaxSide, settings.videoFrames,
+                    )
+                } catch (e: Exception) {
+                    toast("Не удалось открыть файл: ${e.message}")
+                }
+            }
+            attachLoading = false
+        }
+    }
+
+    fun removeAttachment(a: Attachment) {
+        pendingAttachments.remove(a)
+    }
+
     fun send(text: String) {
         val trimmed = text.trim()
-        if (trimmed.isEmpty() || isGenerating) return
+        if ((trimmed.isEmpty() && pendingAttachments.isEmpty()) || isGenerating) return
         if (modelState !is ModelState.Ready) {
             toast("Сначала выберите и загрузите модель во вкладке «Модели»")
             return
         }
-        messages += ChatMessage(ids.incrementAndGet(), Role.USER, trimmed)
+        val prompt = trimmed.ifEmpty {
+            if (pendingAttachments.any { it.kind == AttachmentKind.VIDEO }) "Опиши, что происходит на видео."
+            else "Опиши, что на изображении."
+        }
+        messages += ChatMessage(ids.incrementAndGet(), Role.USER, prompt, pendingAttachments.toList())
+        pendingAttachments.clear()
         generate()
     }
 
@@ -267,10 +379,38 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (messages.lastOrNull()?.role == Role.USER) generate()
     }
 
+    /** Превращает сообщение пользователя с вложениями в реплику для модели. */
+    private fun toTurn(m: ChatMessage, vision: Boolean): ChatTurn {
+        if (m.role == Role.ASSISTANT) return ChatTurn("assistant", m.text)
+        if (m.attachments.isEmpty() || !vision) return ChatTurn("user", m.text)
+        val marker = engine.marker
+        val images = mutableListOf<ChatImage>()
+        val sb = StringBuilder()
+        for (a in m.attachments) {
+            when (a.kind) {
+                AttachmentKind.IMAGE -> {
+                    val f = a.frames.first()
+                    images += ChatImage(a.id, f.rgb, f.width, f.height)
+                    sb.append(marker).append('\n')
+                }
+                AttachmentKind.VIDEO -> {
+                    sb.append("Видео длительностью ${a.durationSec.toInt()} с, ${a.frames.size} кадров:\n")
+                    a.frames.forEachIndexed { i, f ->
+                        images += ChatImage("${a.id}#$i", f.rgb, f.width, f.height)
+                        sb.append('[').append(f.label).append("] ").append(marker).append('\n')
+                    }
+                }
+            }
+        }
+        sb.append(m.text)
+        return ChatTurn("user", sb.toString(), images)
+    }
+
     private fun generate() {
         val replyId = ids.incrementAndGet()
         messages += ChatMessage(replyId, Role.ASSISTANT, "")
         isGenerating = true
+        val vision = (modelState as? ModelState.Ready)?.hasVision == true
 
         genJob = viewModelScope.launch {
             val s = settings
@@ -282,7 +422,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     val history = messages
                         .drop(contextStart)
                         .filter { it.id != replyId && !it.isError }
-                        .map { ChatTurn(if (it.role == Role.USER) "user" else "assistant", it.text) }
+                        .map { toTurn(it, vision) }
                     val turns = buildList {
                         if (s.systemPrompt.isNotBlank()) add(ChatTurn("system", s.systemPrompt))
                         addAll(history)
@@ -310,18 +450,23 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                             }
                             update(replyId) {
                                 it.copy(text = "Сообщение слишком длинное для контекста модели. " +
-                                    "Увеличьте «Размер контекста» в настройках.", isError = true)
+                                    "Увеличьте «Размер контекста» в настройках" +
+                                    (if (vision) ", уменьшите размер фото или число кадров видео." else "."),
+                                    isError = true)
                             }
                         }
                         d.code == LlamaNative.RES_CONTEXT_FULL ->
                             note = "контекст заполнен — очистите чат"
+                        d.code == LlamaNative.RES_MEDIA_ERROR -> update(replyId) {
+                            it.copy(text = "Не удалось обработать изображение.", isError = true)
+                        }
                         d.code < 0 -> update(replyId) {
                             it.copy(text = "Ошибка генерации (код ${d.code})", isError = true)
                         }
                         else -> {
                             val sec = d.millis / 1000.0
                             val speed = if (sec > 0) d.code / sec else 0.0
-                            val stats = "%d ток. · %.1f ток/с".format(d.code, speed)
+                            val stats = "%d ток. · %.1f с · %.1f ток/с".format(d.code, sec, speed)
                             update(replyId) { it.copy(stats = listOfNotNull(stats, note).joinToString(" · ")) }
                             note = null
                         }
@@ -352,6 +497,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             stopGeneration()
             genJob?.join()
             messages.clear()
+            pendingAttachments.clear()
             contextStart = 0
             engine.resetChat()
         }
@@ -359,6 +505,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         engine.stop()
-        runBlocking { engine.unload() }
+        studio.cancel()
+        runBlocking {
+            engine.unload()
+            studio.unload()
+        }
     }
 }

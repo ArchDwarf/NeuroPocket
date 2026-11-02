@@ -1,6 +1,20 @@
 package com.neuropocket.app.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
+import com.neuropocket.app.data.Attachment
+import com.neuropocket.app.data.AttachmentKind
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -59,7 +73,7 @@ fun ChatScreen(vm: MainViewModel, modifier: Modifier, onOpenModels: () -> Unit) 
                 Column {
                     Text("NeuroPocket", style = MaterialTheme.typography.titleMedium)
                     val sub = when (state) {
-                        is ModelState.Ready -> state.name
+                        is ModelState.Ready -> (if (state.hasVision) "👁 " else "") + state.name
                         is ModelState.Loading -> "Загрузка ${state.name}…"
                         is ModelState.Error -> "Ошибка загрузки"
                         ModelState.None -> "Модель не выбрана"
@@ -86,7 +100,9 @@ fun ChatScreen(vm: MainViewModel, modifier: Modifier, onOpenModels: () -> Unit) 
             when {
                 state !is ModelState.Ready -> ModelPlaceholder(state, onOpenModels, vm::reloadModel)
                 vm.messages.isEmpty() -> Text(
-                    "Модель работает прямо на телефоне — без интернета.\nНапишите что-нибудь.",
+                    "Модель работает прямо на телефоне — без интернета.\n" +
+                        (if ((state as? ModelState.Ready)?.hasVision == true) "Напишите что-нибудь или прикрепите фото/видео (＋)."
+                        else "Напишите что-нибудь."),
                     Modifier.align(Alignment.Center).padding(32.dp),
                     textAlign = TextAlign.Center,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -96,10 +112,9 @@ fun ChatScreen(vm: MainViewModel, modifier: Modifier, onOpenModels: () -> Unit) 
         }
 
         InputBar(
+            vm = vm,
             enabled = state is ModelState.Ready,
             generating = vm.isGenerating,
-            onSend = vm::send,
-            onStop = vm::stopGeneration,
         )
     }
 }
@@ -181,6 +196,14 @@ private fun MessageBubble(msg: ChatMessage, typing: Boolean) {
         ) {
             Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
                 if (isUser) {
+                    if (msg.attachments.isNotEmpty()) {
+                        Row(
+                            Modifier.padding(bottom = 6.dp).horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            msg.attachments.forEach { AttachmentThumb(it, size = 96) }
+                        }
+                    }
                     SelectionContainer { Text(msg.text) }
                 } else {
                     val (thinking, answer) = splitThinking(msg.text)
@@ -223,43 +246,105 @@ private fun TypingDots() {
 }
 
 @Composable
-private fun InputBar(
-    enabled: Boolean,
-    generating: Boolean,
-    onSend: (String) -> Unit,
-    onStop: () -> Unit,
-) {
-    var text by rememberSaveable { mutableStateOf("") }
-    Surface(tonalElevation = 3.dp) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.Bottom,
-        ) {
-            OutlinedTextField(
-                value = text,
-                onValueChange = { text = it },
-                modifier = Modifier.weight(1f),
-                placeholder = { Text(if (enabled) "Сообщение" else "Модель не загружена") },
-                enabled = enabled,
-                maxLines = 6,
-                shape = RoundedCornerShape(20.dp),
+private fun AttachmentThumb(a: Attachment, size: Int, onRemove: (() -> Unit)? = null) {
+    Box(Modifier.size(size.dp).clip(RoundedCornerShape(10.dp))) {
+        Image(
+            bitmap = a.thumbnail.asImageBitmap(),
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.fillMaxSize(),
+        )
+        if (a.kind == AttachmentKind.VIDEO) {
+            Text(
+                "▶ ${a.durationSec.toInt()} с · ${a.frames.size} кадр.",
+                color = Color.White,
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.align(Alignment.BottomStart)
+                    .background(Color(0x99000000))
+                    .padding(horizontal = 4.dp, vertical = 2.dp),
             )
-            Spacer(Modifier.size(8.dp))
-            if (generating) {
-                FilledIconButton(onClick = onStop, modifier = Modifier.padding(bottom = 4.dp)) {
-                    // «Стоп» — белый квадрат
-                    Box(
-                        Modifier.size(14.dp).background(
-                            MaterialTheme.colorScheme.onPrimary, RoundedCornerShape(2.dp)
-                        )
+        }
+        if (onRemove != null) {
+            Box(
+                Modifier.align(Alignment.TopEnd).padding(2.dp).size(22.dp)
+                    .clip(RoundedCornerShape(11.dp)).background(Color(0x99000000))
+                    .clickable(onClick = onRemove),
+                contentAlignment = Alignment.Center,
+            ) { Icon(Icons.Default.Close, "Убрать", tint = Color.White, modifier = Modifier.size(16.dp)) }
+        }
+    }
+}
+
+@Composable
+private fun InputBar(vm: MainViewModel, enabled: Boolean, generating: Boolean) {
+    var text by rememberSaveable { mutableStateOf("") }
+    val picker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickMultipleVisualMedia(4)
+    ) { uris -> if (uris.isNotEmpty()) vm.attach(uris) }
+
+    Surface(tonalElevation = 3.dp) {
+        Column {
+            if (vm.pendingAttachments.isNotEmpty() || vm.attachLoading) {
+                Row(
+                    Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 8.dp)
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    vm.pendingAttachments.forEach { a ->
+                        AttachmentThumb(a, size = 72) { vm.removeAttachment(a) }
+                    }
+                    if (vm.attachLoading) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                }
+            }
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.Bottom,
+            ) {
+                IconButton(
+                    onClick = {
+                        if (vm.canAttach) {
+                            picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
+                        } else {
+                            vm.attach(emptyList()) // покажет подсказку
+                        }
+                    },
+                    enabled = enabled && !generating,
+                    modifier = Modifier.padding(bottom = 4.dp),
+                ) {
+                    Icon(
+                        Icons.Default.Add, "Прикрепить фото или видео",
+                        tint = if (vm.canAttach) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
                     )
                 }
-            } else {
-                FilledIconButton(
-                    onClick = { onSend(text); text = "" },
-                    enabled = enabled && text.isNotBlank(),
-                    modifier = Modifier.padding(bottom = 4.dp),
-                ) { Icon(Icons.AutoMirrored.Filled.Send, "Отправить") }
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    modifier = Modifier.weight(1f),
+                    placeholder = { Text(if (enabled) "Сообщение" else "Модель не загружена") },
+                    enabled = enabled,
+                    maxLines = 6,
+                    shape = RoundedCornerShape(20.dp),
+                )
+                Spacer(Modifier.size(8.dp))
+                if (generating) {
+                    FilledIconButton(onClick = vm::stopGeneration, modifier = Modifier.padding(bottom = 4.dp)) {
+                        // «Стоп» — белый квадрат
+                        Box(
+                            Modifier.size(14.dp).background(
+                                MaterialTheme.colorScheme.onPrimary, RoundedCornerShape(2.dp)
+                            )
+                        )
+                    }
+                } else {
+                    FilledIconButton(
+                        onClick = { vm.send(text); text = "" },
+                        enabled = enabled && !vm.attachLoading &&
+                            (text.isNotBlank() || vm.pendingAttachments.isNotEmpty()),
+                        modifier = Modifier.padding(bottom = 4.dp),
+                    ) { Icon(Icons.AutoMirrored.Filled.Send, "Отправить") }
+                }
             }
         }
     }

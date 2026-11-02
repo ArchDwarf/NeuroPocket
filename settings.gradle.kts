@@ -15,3 +15,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "NeuroPocket"
 include(":app")
+include(":sdengine")

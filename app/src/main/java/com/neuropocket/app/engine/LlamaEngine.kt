@@ -10,7 +10,16 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import java.util.concurrent.Executors
 
-data class ChatTurn(val role: String, val content: String)
+/** Картинка для модели с постоянным id (чтобы не кодировать её повторно). */
+class ChatImage(val id: String, val rgb: ByteArray, val width: Int, val height: Int)
+
+/**
+ * Реплика переписки. В [content] на месте каждой картинки стоит
+ * [LlamaEngine.marker]; [images] перечислены в том же порядке.
+ */
+data class ChatTurn(val role: String, val content: String, val images: List<ChatImage> = emptyList())
+
+data class LoadedModel(val info: String, val hasVision: Boolean)
 
 data class SamplingParams(
     val temperature: Float = 0.7f,
@@ -42,6 +51,9 @@ class LlamaEngine(private val nativeLibDir: String) {
 
     val isLoaded: Boolean get() = handle != 0L
 
+    /** Маркер места картинки в тексте сообщения. */
+    val marker: String by lazy { LlamaNative.mediaMarker() }
+
     private fun ensureInit() {
         if (!initialized) {
             LlamaNative.init(nativeLibDir)
@@ -54,15 +66,15 @@ class LlamaEngine(private val nativeLibDir: String) {
         LlamaNative.systemInfo()
     }
 
-    /** Загружает модель, возвращает её описание. Бросает исключение при ошибке. */
-    suspend fun load(path: String, contextSize: Int, threads: Int): String =
+    /** Загружает модель (и модуль зрения, если есть). Бросает исключение при ошибке. */
+    suspend fun load(path: String, mmprojPath: String?, contextSize: Int, threads: Int): LoadedModel =
         withContext(dispatcher) {
             ensureInit()
             if (handle != 0L) {
                 LlamaNative.free(handle)
                 handle = 0L
             }
-            val h = LlamaNative.load(path, contextSize, threads)
+            val h = LlamaNative.load(path, mmprojPath, contextSize, threads)
             if (h == 0L) {
                 throw IllegalStateException(
                     "Не удалось загрузить модель. Файл повреждён, архитектура не " +
@@ -70,7 +82,7 @@ class LlamaEngine(private val nativeLibDir: String) {
                 )
             }
             handle = h
-            LlamaNative.modelInfo(h)
+            LoadedModel(LlamaNative.modelInfo(h), LlamaNative.hasVision(h))
         }
 
     suspend fun unload() = withContext(dispatcher) {
@@ -94,10 +106,15 @@ class LlamaEngine(private val nativeLibDir: String) {
         val started = System.currentTimeMillis()
         val code = withContext(dispatcher) {
             if (handle == 0L) return@withContext LlamaNative.RES_BAD_HANDLE
+            val images = turns.flatMap { it.images }
             LlamaNative.generate(
                 handle,
                 turns.map { it.role }.toTypedArray(),
                 turns.map { it.content }.toTypedArray(),
+                images.map { it.rgb }.toTypedArray(),
+                images.map { it.width }.toIntArray(),
+                images.map { it.height }.toIntArray(),
+                images.map { it.id }.toTypedArray(),
                 params.temperature,
                 params.topP,
                 params.topK,
