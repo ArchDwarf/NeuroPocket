@@ -33,6 +33,10 @@ set(MTMD_VIDEO             OFF CACHE BOOL "" FORCE)
 set(GGML_NATIVE            OFF CACHE BOOL "" FORCE)
 set(GGML_OPENMP            OFF CACHE BOOL "" FORCE)
 set(GGML_LLAMAFILE         OFF CACHE BOOL "" FORCE)
+# Видеокарта на компьютере: -DGGML_VULKAN=ON (на телефоне выключено)
+if(NOT ANDROID AND NOT DEFINED GGML_VULKAN)
+    set(GGML_VULKAN OFF CACHE BOOL "")
+endif()
 # Несколько вариантов CPU-бэкенда (armv8.0 / dotprod / i8mm / sve ...):
 # во время работы выбирается самый быстрый, который поддерживает процессор.
 set(GGML_BACKEND_DL        ON  CACHE BOOL "" FORCE)
@@ -56,6 +60,12 @@ add_library(neuropocket SHARED llm_jni.cpp)
 target_link_libraries(neuropocket
     llama
     mtmd
-    ggml
-    android
-    log)
+    ggml)
+
+if(ANDROID)
+    target_link_libraries(neuropocket android log)
+else()
+    # Компьютер: заголовки JNI из установленной JDK
+    find_package(JNI REQUIRED)
+    target_include_directories(neuropocket PRIVATE ${JNI_INCLUDE_DIRS})
+endif()

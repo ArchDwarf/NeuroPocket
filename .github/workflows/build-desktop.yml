@@ -1,0 +1,95 @@
+name: Компьютерная версия (Windows)
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  # Быстрая проверка Kotlin-кода (несколько минут), чтобы ошибки было видно сразу
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Компиляция Kotlin
+        run: |
+          chmod +x gradlew
+          ./gradlew -p desktop compileKotlin --no-daemon
+
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 300
+    env:
+      VULKAN_VERSION: 1.4.357.0
+      SHERPA_VERSION: 1.13.8
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Vulkan SDK
+        shell: pwsh
+        run: |
+          curl.exe -o $env:RUNNER_TEMP/VulkanSDK-Installer.exe -L "https://sdk.lunarg.com/sdk/download/${env:VULKAN_VERSION}/windows/vulkansdk-windows-X64-${env:VULKAN_VERSION}.exe"
+          & "$env:RUNNER_TEMP\VulkanSDK-Installer.exe" --accept-licenses --default-answer --confirm-command install
+          Add-Content $env:GITHUB_ENV "VULKAN_SDK=C:\VulkanSDK\${env:VULKAN_VERSION}"
+          Add-Content $env:GITHUB_PATH "C:\VulkanSDK\${env:VULKAN_VERSION}\bin"
+
+      - name: llama.cpp (видеокарта Vulkan + процессор)
+        shell: pwsh
+        run: |
+          cmake -S app/src/main/cpp -B build-llm -DGGML_VULKAN=ON
+          cmake --build build-llm --config Release --parallel 4
+
+      - name: stable-diffusion.cpp (Vulkan)
+        shell: pwsh
+        run: |
+          cmake -S sdengine/src/main/cpp -B build-sd-vk -DSD_VULKAN=ON -DSD_JNI_NAME=sdengine_vk
+          cmake --build build-sd-vk --config Release --target sdengine --parallel 4
+
+      - name: stable-diffusion.cpp (процессор)
+        shell: pwsh
+        run: |
+          cmake -S sdengine/src/main/cpp -B build-sd-cpu -DSD_JNI_NAME=sdengine_cpu
+          cmake --build build-sd-cpu --config Release --target sdengine --parallel 4
+
+      - name: Сбор библиотек
+        shell: pwsh
+        run: |
+          $dst = "desktop/resources/windows-x64"
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          Get-ChildItem build-llm -Recurse -Filter *.dll |
+            Where-Object { $_.FullName -notmatch "CMakeFiles|vulkan-shaders-gen|-subbuild" } |
+            Copy-Item -Destination $dst -Force
+          Get-ChildItem build-sd-vk -Recurse -Filter sdengine_vk.dll | Copy-Item -Destination $dst -Force
+          Get-ChildItem build-sd-cpu -Recurse -Filter sdengine_cpu.dll | Copy-Item -Destination $dst -Force
+          # sherpa-onnx: распознавание и синтез речи
+          curl.exe -L -o sherpa.tar.bz2 "https://github.com/k2-fsa/sherpa-onnx/releases/download/v${env:SHERPA_VERSION}/sherpa-onnx-v${env:SHERPA_VERSION}-win-x64-jni.tar.bz2"
+          tar -xjf sherpa.tar.bz2
+          Get-ChildItem "sherpa-onnx-v${env:SHERPA_VERSION}-win-x64-jni/lib" -Filter *.dll | Copy-Item -Destination $dst -Force
+          Get-ChildItem $dst | Format-Table Name, Length
+
+      - name: Установщик
+        shell: bash
+        run: |
+          chmod +x gradlew
+          ./gradlew -p desktop packageMsi packageExe --no-daemon
+
+      - name: Загрузка установщика
+        uses: actions/upload-artifact@v4
+        with:
+          name: NeuroPocket-Windows
+          path: |
+            desktop/build/compose/binaries/main/msi/*.msi
+            desktop/build/compose/binaries/main/exe/*.exe

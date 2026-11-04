@@ -1,0 +1,5 @@
+libs/
+build/
+.gradle/
+resources/windows-x64/*
+!resources/windows-x64/.gitkeep

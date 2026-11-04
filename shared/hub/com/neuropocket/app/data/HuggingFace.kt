@@ -83,6 +83,17 @@ object HuggingFace {
     fun downloadUrl(repo: String, path: String): String =
         "$BASE/$repo/resolve/main/${encodePath(path)}?download=true"
 
+    /** Поиск по любым моделям Hugging Face (без фильтра по типу). */
+    suspend fun searchAny(query: String, token: String, filter: String = ""): List<HfRepo> = withContext(Dispatchers.IO) {
+        val q = if (query.isBlank()) "" else "search=${enc(query.trim())}&"
+        val f = if (filter.isBlank()) "" else "$filter&"
+        val json = JSONArray(get("$BASE/api/models?$q${f}sort=downloads&direction=-1&limit=50", token))
+        List(json.length()) { i ->
+            val o = json.getJSONObject(i)
+            HfRepo(o.optString("id", o.optString("modelId")), o.optLong("downloads"), o.optLong("likes"))
+        }.filter { it.id.isNotBlank() }
+    }
+
     private fun get(url: String, token: String): String {
         val conn = URL(url).openConnection() as HttpURLConnection
         conn.connectTimeout = 15_000
@@ -119,11 +130,13 @@ object HuggingFace {
         }.filter { it.id.isNotBlank() }
     }
 
-    private data class RemoteFile(val path: String, val size: Long) {
+    /** Файл в репозитории Hugging Face. */
+    data class RemoteFile(val path: String, val size: Long) {
         val name: String get() = path.substringAfterLast('/')
     }
 
-    private suspend fun tree(repo: String, token: String): List<RemoteFile> = withContext(Dispatchers.IO) {
+    /** Все файлы репозитория (включая вложенные папки). */
+    suspend fun tree(repo: String, token: String): List<RemoteFile> = withContext(Dispatchers.IO) {
         val json = JSONArray(get("$BASE/api/models/$repo/tree/main?recursive=true", token))
         buildList {
             for (i in 0 until json.length()) {

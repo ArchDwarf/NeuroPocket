@@ -84,7 +84,7 @@ static void progress_cb(int step, int steps, float time, void *) {
     if (attached) g_vm->DetachCurrentThread();
 }
 
-JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *) {
+extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *) {
     g_vm = vm;
     sd_set_log_callback(log_cb, nullptr);
     sd_set_progress_callback(progress_cb, nullptr);
