@@ -19,13 +19,14 @@ internal object LlamaNative {
     const val RES_MEDIA_ERROR = -5
 
     init {
-        System.loadLibrary("neuropocket")
+        // Android: System.loadLibrary; компьютер: DLL из папки приложения
+        LlamaLibrary.load()
     }
 
     external fun init(nativeLibDir: String)
     external fun systemInfo(): String
     external fun mediaMarker(): String
-    external fun load(path: String, mmprojPath: String?, nCtx: Int, nThreads: Int): Long
+    external fun load(path: String, mmprojPath: String?, nCtx: Int, nThreads: Int, nGpuLayers: Int): Long
     external fun hasVision(handle: Long): Boolean
     external fun free(handle: Long)
     external fun modelInfo(handle: Long): String

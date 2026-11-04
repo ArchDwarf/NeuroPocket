@@ -3,7 +3,6 @@
 // только stop() может вызываться из любого потока.
 
 #include <jni.h>
-#include <android/log.h>
 
 #include <algorithm>
 #include <atomic>
@@ -16,10 +15,28 @@
 #include "mtmd.h"
 #include "mtmd-helper.h"
 
+#ifdef __ANDROID__
+#include <android/log.h>
 #define TAG "NeuroPocket"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
+#define LOG_WRITE(prio, text) __android_log_write(prio, TAG, text)
+#define PRIO_DEBUG ANDROID_LOG_DEBUG
+#define PRIO_INFO ANDROID_LOG_INFO
+#define PRIO_WARN ANDROID_LOG_WARN
+#define PRIO_ERROR ANDROID_LOG_ERROR
+#else
+#include <cstdio>
+#define LOGI(...) do { fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); } while (0)
+#define LOGW(...) LOGI(__VA_ARGS__)
+#define LOGE(...) LOGI(__VA_ARGS__)
+#define PRIO_DEBUG 3
+#define PRIO_INFO 4
+#define PRIO_WARN 5
+#define PRIO_ERROR 6
+#define LOG_WRITE(prio, text) do { if ((prio) >= PRIO_WARN) fputs(text, stderr); } while (0)
+#endif
 
 // Коды результата generate()
 static constexpr int RES_TEMPLATE_ERROR = -1;
@@ -52,12 +69,11 @@ struct Session {
 };
 
 static void log_callback(ggml_log_level level, const char *text, void *) {
-    int prio = ANDROID_LOG_DEBUG;
-    if (level == GGML_LOG_LEVEL_ERROR) prio = ANDROID_LOG_ERROR;
-    else if (level == GGML_LOG_LEVEL_WARN) prio = ANDROID_LOG_WARN;
-    else if (level == GGML_LOG_LEVEL_INFO) prio = ANDROID_LOG_INFO;
-    __android_log_write(prio, TAG, text);
-    (void) prio;
+    int prio = PRIO_DEBUG;
+    if (level == GGML_LOG_LEVEL_ERROR) prio = PRIO_ERROR;
+    else if (level == GGML_LOG_LEVEL_WARN) prio = PRIO_WARN;
+    else if (level == GGML_LOG_LEVEL_INFO) prio = PRIO_INFO;
+    LOG_WRITE(prio, text);
 }
 
 static bool abort_callback(void *) { return g_abort.load(); }
@@ -206,13 +222,14 @@ Java_com_neuropocket_app_engine_LlamaNative_mediaMarker(JNIEnv *env, jobject) {
 
 JNIEXPORT jlong JNICALL
 Java_com_neuropocket_app_engine_LlamaNative_load(JNIEnv *env, jobject, jstring jpath, jstring jmmproj,
-                                                 jint nCtx, jint nThreads) {
+                                                 jint nCtx, jint nThreads, jint nGpuLayers) {
     std::string path = jstring_to_std(env, jpath);
     std::string mmproj = jstring_to_std(env, jmmproj);
     g_abort.store(false);
 
     llama_model_params mp = llama_model_default_params();
-    mp.n_gpu_layers = 0; // всё считается на CPU телефона; веса читаются через mmap
+    // 0 — всё на процессоре (телефон); >0 — сколько слоёв отдать видеокарте (компьютер)
+    mp.n_gpu_layers = nGpuLayers;
     llama_model *model = llama_model_load_from_file(path.c_str(), mp);
     if (!model) {
         LOGE("Не удалось загрузить модель %s", path.c_str());
@@ -250,7 +267,7 @@ Java_com_neuropocket_app_engine_LlamaNative_load(JNIEnv *env, jobject, jstring j
 
     if (!mmproj.empty()) {
         mtmd_context_params mparams = mtmd_context_params_default();
-        mparams.use_gpu = false;
+        mparams.use_gpu = nGpuLayers > 0;
         mparams.n_threads = nThreads;
         mparams.print_timings = false;
         mparams.warmup = false;

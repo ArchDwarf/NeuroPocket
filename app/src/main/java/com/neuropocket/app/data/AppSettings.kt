@@ -22,6 +22,13 @@ data class Settings(
     val imageModelPath: String = "",
     /** Тип весов при загрузке модели картинок: "" — как в файле, иначе f16 / q8_0 / q4_0. */
     val imageWeightType: String = "",
+    /** Папка модели распознавания речи. */
+    val asrModelDir: String = "",
+    /** Папка модели синтеза речи. */
+    val ttsModelDir: String = "",
+    val ttsSpeed: Float = 1f,
+    /** Озвучивать ответы автоматически. */
+    val autoSpeak: Boolean = false,
 ) {
     companion object {
         fun defaultThreads(): Int =
@@ -50,6 +57,10 @@ class AppSettings(context: Context) {
             videoFrames = prefs.getInt("videoFrames", d.videoFrames),
             imageModelPath = prefs.getString("imageModelPath", "") ?: "",
             imageWeightType = prefs.getString("imageWeightType", "") ?: "",
+            asrModelDir = prefs.getString("asrModelDir", "") ?: "",
+            ttsModelDir = prefs.getString("ttsModelDir", "") ?: "",
+            ttsSpeed = prefs.getFloat("ttsSpeed", d.ttsSpeed),
+            autoSpeak = prefs.getBoolean("autoSpeak", d.autoSpeak),
         )
     }
 
@@ -68,5 +79,9 @@ class AppSettings(context: Context) {
         putInt("videoFrames", s.videoFrames)
         putString("imageModelPath", s.imageModelPath)
         putString("imageWeightType", s.imageWeightType)
+        putString("asrModelDir", s.asrModelDir)
+        putString("ttsModelDir", s.ttsModelDir)
+        putFloat("ttsSpeed", s.ttsSpeed)
+        putBoolean("autoSpeak", s.autoSpeak)
     }
 }

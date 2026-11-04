@@ -164,7 +164,14 @@ private fun MessageList(vm: MainViewModel) {
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         items(vm.messages, key = { it.id }) { msg ->
-            MessageBubble(msg, typing = vm.isGenerating && msg.id == last?.id)
+            val typing = vm.isGenerating && msg.id == last?.id
+            MessageBubble(
+                msg, typing = typing,
+                speaking = vm.speech.speakingId == msg.id,
+                onSpeak = if (!typing && msg.role == Role.ASSISTANT && !msg.isError && msg.text.isNotBlank()) {
+                    { if (vm.speech.speakingId == msg.id) vm.speech.stopSpeaking() else vm.speech.speak(msg.id, msg.text) }
+                } else null,
+            )
         }
     }
 }
@@ -182,7 +189,7 @@ private fun splitThinking(text: String): Pair<String?, String> {
 }
 
 @Composable
-private fun MessageBubble(msg: ChatMessage, typing: Boolean) {
+private fun MessageBubble(msg: ChatMessage, typing: Boolean, speaking: Boolean = false, onSpeak: (() -> Unit)? = null) {
     val isUser = msg.role == Role.USER
     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start) {
         Surface(
@@ -223,12 +230,22 @@ private fun MessageBubble(msg: ChatMessage, typing: Boolean) {
                         answer.isNotEmpty() -> SelectionContainer { Text(answer) }
                         typing -> TypingDots()
                     }
-                    msg.stats?.let {
-                        Text(
-                            it, style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(top = 6.dp),
-                        )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        msg.stats?.let {
+                            Text(
+                                it, style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f, fill = false).padding(top = 6.dp),
+                            )
+                        }
+                        if (onSpeak != null) {
+                            Text(
+                                if (speaking) "  ⏹ стоп" else "  🔊",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(top = 6.dp).clickable(onClick = onSpeak),
+                            )
+                        }
                     }
                 }
             }
@@ -272,6 +289,43 @@ private fun AttachmentThumb(a: Attachment, size: Int, onRemove: (() -> Unit)? = 
                 contentAlignment = Alignment.Center,
             ) { Icon(Icons.Default.Close, "Убрать", tint = Color.White, modifier = Modifier.size(16.dp)) }
         }
+    }
+}
+
+@Composable
+private fun MicButton(vm: MainViewModel, enabled: Boolean, onText: (String) -> Unit) {
+    val sp = vm.speech
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) sp.startDictation(onText)
+    }
+    when {
+        sp.isTranscribing -> Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+            CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
+        }
+        sp.isRecording -> FilledIconButton(
+            onClick = sp::stopDictation,
+            modifier = Modifier.padding(bottom = 4.dp),
+            colors = androidx.compose.material3.IconButtonDefaults.filledIconButtonColors(
+                containerColor = MaterialTheme.colorScheme.error,
+            ),
+        ) {
+            // Пульсирующий кружок — уровень громкости
+            Box(
+                Modifier.size((10 + 14 * sp.level.coerceIn(0f, 1f)).dp)
+                    .background(MaterialTheme.colorScheme.onError, RoundedCornerShape(50))
+            )
+        }
+        else -> IconButton(
+            onClick = {
+                val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+                    context, android.Manifest.permission.RECORD_AUDIO,
+                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                if (granted) sp.startDictation(onText) else permission.launch(android.Manifest.permission.RECORD_AUDIO)
+            },
+            enabled = enabled,
+            modifier = Modifier.padding(bottom = 4.dp),
+        ) { Text("🎤", style = MaterialTheme.typography.titleMedium) }
     }
 }
 
@@ -327,7 +381,11 @@ private fun InputBar(vm: MainViewModel, enabled: Boolean, generating: Boolean) {
                     maxLines = 6,
                     shape = RoundedCornerShape(20.dp),
                 )
-                Spacer(Modifier.size(8.dp))
+                Spacer(Modifier.size(4.dp))
+                MicButton(vm, enabled = enabled && !generating) { spoken ->
+                    text = if (text.isBlank()) spoken else text.trimEnd() + " " + spoken
+                }
+                Spacer(Modifier.size(4.dp))
                 if (generating) {
                     FilledIconButton(onClick = vm::stopGeneration, modifier = Modifier.padding(bottom = 4.dp)) {
                         // «Стоп» — белый квадрат

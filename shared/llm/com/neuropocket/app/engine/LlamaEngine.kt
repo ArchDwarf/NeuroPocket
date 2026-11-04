@@ -67,14 +67,20 @@ class LlamaEngine(private val nativeLibDir: String) {
     }
 
     /** Загружает модель (и модуль зрения, если есть). Бросает исключение при ошибке. */
-    suspend fun load(path: String, mmprojPath: String?, contextSize: Int, threads: Int): LoadedModel =
+    suspend fun load(
+        path: String,
+        mmprojPath: String?,
+        contextSize: Int,
+        threads: Int,
+        gpuLayers: Int = 0,
+    ): LoadedModel =
         withContext(dispatcher) {
             ensureInit()
             if (handle != 0L) {
                 LlamaNative.free(handle)
                 handle = 0L
             }
-            val h = LlamaNative.load(path, mmprojPath, contextSize, threads)
+            val h = LlamaNative.load(path, mmprojPath, contextSize, threads, gpuLayers)
             if (h == 0L) {
                 throw IllegalStateException(
                     "Не удалось загрузить модель. Файл повреждён, архитектура не " +

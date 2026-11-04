@@ -113,11 +113,18 @@ private fun ModelsHome(vm: MainViewModel, modifier: Modifier) {
                 }
             },
         )
-        PrimaryTabRow(selectedTabIndex = kind.ordinal) {
-            Tab(selected = kind == ModelKind.CHAT, onClick = { vm.switchKind(ModelKind.CHAT) },
-                text = { Text("Чат и зрение") })
-            Tab(selected = kind == ModelKind.IMAGE, onClick = { vm.switchKind(ModelKind.IMAGE) },
+        PrimaryTabRow(selectedTabIndex = if (vm.speechTab) 2 else kind.ordinal) {
+            Tab(selected = !vm.speechTab && kind == ModelKind.CHAT,
+                onClick = { vm.speechTab = false; vm.switchKind(ModelKind.CHAT) },
+                text = { Text("Чат") })
+            Tab(selected = !vm.speechTab && kind == ModelKind.IMAGE,
+                onClick = { vm.speechTab = false; vm.switchKind(ModelKind.IMAGE) },
                 text = { Text("Картинки") })
+            Tab(selected = vm.speechTab, onClick = { vm.speechTab = true }, text = { Text("Речь") })
+        }
+        if (vm.speechTab) {
+            SpeechModelsList(vm.speech, vm.settings)
+            return@Column
         }
         val installed = if (kind == ModelKind.CHAT) vm.installed else vm.installedImage
         val activePath = if (kind == ModelKind.CHAT) vm.settings.activeModelPath else vm.settings.imageModelPath

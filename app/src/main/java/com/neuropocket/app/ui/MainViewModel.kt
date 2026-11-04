@@ -27,6 +27,7 @@ import com.neuropocket.app.engine.GenEvent
 import com.neuropocket.app.engine.LlamaEngine
 import com.neuropocket.app.engine.LlamaNative
 import com.neuropocket.app.engine.SamplingParams
+import com.neuropocket.app.speech.SpeechController
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
@@ -83,6 +84,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ----- Каталог Hugging Face -----
     var browseKind by mutableStateOf(ModelKind.CHAT); private set
+    /** Во вкладке «Модели» открыт раздел «Речь». */
+    var speechTab by mutableStateOf(false)
 
     fun switchKind(kind: ModelKind) {
         if (kind == browseKind) return
@@ -117,6 +120,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         saveSettings = { updateSettings(it, reload = false) },
         toast = ::toast,
         beforeLoad = ::freeChatIfLowMemory,
+    )
+
+    // ----- Речь -----
+    val speech = SpeechController(
+        app = app,
+        scope = viewModelScope,
+        settings = { settings },
+        saveSettings = { updateSettings(it, reload = false) },
+        toast = ::toast,
     )
 
     init {
@@ -469,6 +481,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                             val stats = "%d ток. · %.1f с · %.1f ток/с".format(d.code, sec, speed)
                             update(replyId) { it.copy(stats = listOfNotNull(stats, note).joinToString(" · ")) }
                             note = null
+                            if (s.autoSpeak && speech.ttsModel != null) speech.speak(replyId, sb.toString())
                         }
                     }
                     note?.let { n -> update(replyId) { it.copy(stats = n) } }
@@ -496,6 +509,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             stopGeneration()
             genJob?.join()
+            speech.stopSpeaking()
             messages.clear()
             pendingAttachments.clear()
             contextStart = 0
@@ -504,6 +518,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
+        speech.release()
         engine.stop()
         studio.cancel()
         runBlocking {

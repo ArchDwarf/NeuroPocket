@@ -3,6 +3,8 @@
 
     <!-- Интернет нужен только для скачивания моделей. Сама нейросеть работает офлайн. -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Голосовой ввод (распознавание речи работает на устройстве) -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- Сохранение картинок в галерею на Android 9 (на новых версиях не нужно) -->
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"

@@ -4,6 +4,19 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+// sherpa-onnx — распознавание и синтез речи. Готовая библиотека скачивается
+// с GitHub при первой сборке (≈50 МБ, в репозиторий не кладётся).
+val sherpaVersion = "1.13.8"
+val sherpaAar = file("libs/sherpa-onnx-$sherpaVersion.aar")
+if (!sherpaAar.exists()) {
+    sherpaAar.parentFile.mkdirs()
+    logger.lifecycle("Загрузка sherpa-onnx $sherpaVersion…")
+    val url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/v$sherpaVersion/sherpa-onnx-$sherpaVersion.aar"
+    val tmp = file("libs/sherpa.tmp")
+    uri(url).toURL().openStream().use { input -> tmp.outputStream().use { input.copyTo(it) } }
+    tmp.renameTo(sherpaAar)
+}
+
 android {
     namespace = "com.neuropocket.app"
     compileSdk = 36
@@ -49,6 +62,14 @@ android {
         jniLibs.useLegacyPackaging = true
         // libc++_shared.so есть и в :app, и в :sdengine — берём один
         jniLibs.pickFirsts += "**/libc++_shared.so"
+        jniLibs.pickFirsts += "**/libonnxruntime.so"
+    }
+
+    sourceSets {
+        getByName("main") {
+            // Общий код с компьютерной версией
+            java.srcDirs("../shared/llm", "../shared/hub", "../shared/speech")
+        }
     }
 
     compileOptions {
@@ -68,6 +89,8 @@ kotlin {
 
 dependencies {
     implementation(project(":sdengine"))
+    implementation(files(sherpaAar))
+    implementation(libs.commons.compress)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.lifecycle.runtime.ktx)

@@ -29,6 +29,13 @@ android {
         }
     }
 
+    sourceSets {
+        getByName("main") {
+            // Общий код с компьютерной версией
+            java.srcDirs("../shared/sd")
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
