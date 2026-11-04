@@ -57,7 +57,8 @@ compose.desktop {
             targetFormats(TargetFormat.Msi, TargetFormat.Exe)
             packageName = "NeuroPocket"
             packageVersion = "1.0.0"
-            description = "Нейросети на компьютере: чат, зрение, картинки, видео, речь"
+            // Только латиница: WiX по умолчанию собирает MSI в кодировке 1252
+            description = "Local AI: chat, vision, images, video, speech"
             vendor = "NeuroPocket"
             // Нативные библиотеки (llama.cpp, stable-diffusion.cpp, sherpa-onnx) — resources/windows-x64
             appResourcesRootDir.set(project.layout.projectDirectory.dir("resources"))

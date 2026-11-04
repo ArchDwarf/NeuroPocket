@@ -98,6 +98,12 @@ jobs:
           chmod +x gradlew
           ./gradlew -p desktop packageMsi packageExe --no-daemon
 
+      - name: Журналы jpackage (при ошибке)
+        if: failure()
+        shell: bash
+        run: |
+          for f in desktop/build/compose/logs/*/*.txt; do echo "===== $f"; cat "$f"; done || true
+
       - name: Загрузка установщика
         uses: actions/upload-artifact@v4
         with:
