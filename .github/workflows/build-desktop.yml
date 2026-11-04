@@ -24,6 +24,8 @@ jobs:
 
   windows:
     runs-on: windows-2022
+    permissions:
+      contents: write
     timeout-minutes: 300
     env:
       VULKAN_VERSION: 1.4.357.0
@@ -37,6 +39,17 @@ jobs:
           java-version: "21"
 
       - uses: gradle/actions/setup-gradle@v4
+
+      # Кэш собранных нативных библиотек: повторные сборки занимают минуты, а не час
+      - name: Кэш нативной сборки
+        id: native-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            build-llm
+            build-sd-vk
+            build-sd-cpu
+          key: native-win-${{ env.VULKAN_VERSION }}-${{ hashFiles('app/src/main/cpp/**', 'sdengine/src/main/cpp/**') }}
 
       - name: Vulkan SDK
         shell: pwsh
@@ -64,21 +77,20 @@ jobs:
           cmake -S sdengine/src/main/cpp -B build-sd-cpu -DSD_JNI_NAME=sdengine_cpu
           cmake --build build-sd-cpu --config Release --target sdengine --parallel 4
 
+      # Сохраняем кэш сразу, даже если упадёт упаковка
+      - name: Сохранение кэша
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            build-llm
+            build-sd-vk
+            build-sd-cpu
+          key: native-win-${{ env.VULKAN_VERSION }}-${{ hashFiles('app/src/main/cpp/**', 'sdengine/src/main/cpp/**') }}
+
       - name: Сбор библиотек
         shell: pwsh
-        run: |
-          $dst = "desktop/resources/windows-x64"
-          New-Item -ItemType Directory -Force -Path $dst | Out-Null
-          Get-ChildItem build-llm -Recurse -Filter *.dll |
-            Where-Object { $_.FullName -notmatch "CMakeFiles|vulkan-shaders-gen|-subbuild" } |
-            Copy-Item -Destination $dst -Force
-          Get-ChildItem build-sd-vk -Recurse -Filter sdengine_vk.dll | Copy-Item -Destination $dst -Force
-          Get-ChildItem build-sd-cpu -Recurse -Filter sdengine_cpu.dll | Copy-Item -Destination $dst -Force
-          # sherpa-onnx: распознавание и синтез речи
-          curl.exe -L -o sherpa.tar.bz2 "https://github.com/k2-fsa/sherpa-onnx/releases/download/v${env:SHERPA_VERSION}/sherpa-onnx-v${env:SHERPA_VERSION}-win-x64-jni.tar.bz2"
-          tar -xjf sherpa.tar.bz2
-          Get-ChildItem "sherpa-onnx-v${env:SHERPA_VERSION}-win-x64-jni/lib" -Filter *.dll | Copy-Item -Destination $dst -Force
-          Get-ChildItem $dst | Format-Table Name, Length
+        run: python .github/scripts/collect_dlls.py
 
       - name: Установщик
         shell: bash
@@ -93,3 +105,18 @@ jobs:
           path: |
             desktop/build/compose/binaries/main/msi/*.msi
             desktop/build/compose/binaries/main/exe/*.exe
+
+      - name: Публикация в Releases
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: windows-latest
+          name: NeuroPocket для Windows (последняя сборка)
+          body: |
+            Установщик NeuroPocket для Windows 10/11 (x64). Видеокарта через Vulkan (NVIDIA, AMD, Intel), без неё — процессор.
+            Сборка из коммита ${{ github.sha }}.
+          files: |
+            desktop/build/compose/binaries/main/msi/*.msi
+            desktop/build/compose/binaries/main/exe/*.exe
+          overwrite_files: true
+          make_latest: true

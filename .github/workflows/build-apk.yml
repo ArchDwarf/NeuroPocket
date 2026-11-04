@@ -8,6 +8,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v5
@@ -34,3 +36,15 @@ jobs:
         with:
           name: NeuroPocket-apk
           path: app/build/outputs/apk/release/*.apk
+
+      - name: Публикация в Releases
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: android-latest
+          name: NeuroPocket для Android (последняя сборка)
+          body: |
+            APK для Android 9+ (arm64). Сборка из коммита ${{ github.sha }}.
+          files: app/build/outputs/apk/release/*.apk
+          overwrite_files: true
+          make_latest: false

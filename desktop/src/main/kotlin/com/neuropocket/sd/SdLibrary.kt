@@ -15,6 +15,7 @@ internal object SdLibrary {
         private set
 
     fun load() {
+        NativeDir.loadRuntime()
         if (preferGpu) {
             try {
                 if (NativeDir.loadIfExists("sdengine_vk")) {

@@ -36,6 +36,7 @@ class DesktopSpeechEngine(private val threads: () -> Int) {
     init {
         // Нативные библиотеки sherpa-onnx лежат рядом с остальными DLL
         System.setProperty("sherpa_onnx.native.path", NativeDir.dir.absolutePath)
+        NativeDir.loadRuntime()
     }
 
     private val dispatcher = Executors.newSingleThreadExecutor { r -> Thread(r, "speech") }.asCoroutineDispatcher()

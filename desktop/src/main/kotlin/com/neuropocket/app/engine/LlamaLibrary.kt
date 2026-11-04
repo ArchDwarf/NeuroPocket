@@ -9,6 +9,7 @@ import com.neuropocket.desktop.NativeDir
  */
 internal object LlamaLibrary {
     fun load() {
+        NativeDir.loadRuntime()
         for (name in listOf("ggml-base", "ggml", "llama", "mtmd")) NativeDir.loadIfExists(name)
         if (!NativeDir.loadIfExists("neuropocket")) {
             throw UnsatisfiedLinkError("Не найдена библиотека neuropocket в ${NativeDir.dir}")

@@ -17,6 +17,17 @@ object NativeDir {
 
     fun file(name: String): File = File(dir, System.mapLibraryName(name))
 
+    /** Среда выполнения Visual C++ — на случай, если в системе её нет. */
+    fun loadRuntime() {
+        if (!System.getProperty("os.name").lowercase().contains("win")) return
+        for (n in listOf("vcruntime140", "vcruntime140_1", "msvcp140", "msvcp140_1", "msvcp140_2", "vcomp140")) {
+            try {
+                loadIfExists(n)
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
     /** Загружает библиотеку по имени без расширения, если файл есть. */
     fun loadIfExists(name: String): Boolean {
         val f = file(name)
