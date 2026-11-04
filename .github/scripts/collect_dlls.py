@@ -5,6 +5,9 @@ import sys
 import tarfile
 import urllib.request
 
+# Консоль Windows по умолчанию не в UTF-8
+sys.stdout.reconfigure(encoding="utf-8")
+
 dst = os.path.join("desktop", "resources", "windows-x64")
 os.makedirs(dst, exist_ok=True)
 
