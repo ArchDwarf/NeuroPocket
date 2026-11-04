@@ -165,7 +165,7 @@ class ImageController(private val app: AppState, val video: Boolean) {
         val f = DesktopMedia.chooseFile("Исходное изображение", DesktopMedia.IMAGE_EXT, "Изображения") ?: return
         app.scope.launch {
             try {
-                setSource(DesktopMedia.loadImage(f))
+                useSource(DesktopMedia.loadImage(f))
             } catch (e: Exception) {
                 app.toast(e.message ?: "Ошибка")
             }
@@ -183,7 +183,7 @@ class ImageController(private val app: AppState, val video: Boolean) {
         }
     }
 
-    fun setSource(img: BufferedImage) {
+    fun useSource(img: BufferedImage) {
         val rgb = DesktopMedia.resize(img, img.width, img.height)
         source = rgb
         sourceBitmap = DesktopMedia.scaleToMax(rgb, 1024).toComposeImageBitmap()

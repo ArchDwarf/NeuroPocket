@@ -186,7 +186,7 @@ private fun Controls(app: AppState, c: ImageController) {
             OutlinedButton(onClick = c::chooseSource) { Text("🖼 Изображение") }
             OutlinedButton(onClick = { c.chooseVideoFrame { f, d -> framePick = f to d } }) { Text("🎞 Кадр из видео") }
             if (!c.video && c.current != null) {
-                OutlinedButton(onClick = { c.setSource(c.current!!.image) }) { Text("Результат") }
+                OutlinedButton(onClick = { c.useSource(c.current!!.image) }) { Text("Результат") }
             }
         }
         Hint(if (c.video) "С картинкой модель «оживит» её (Wan 2.2 5B / A14B)." else "Добавьте, чтобы изменить существующее изображение.")
@@ -289,7 +289,7 @@ private fun Controls(app: AppState, c: ImageController) {
     framePick?.let { (file, duration) ->
         FramePickerDialog(file, duration, onDismiss = { framePick = null }) { img ->
             framePick = null
-            c.setSource(img)
+            c.useSource(img)
         }
     }
 }
@@ -339,7 +339,7 @@ private fun ColumnScope.ImageResultView(app: AppState, c: ImageController) {
     if (cur != null) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp)) {
             Hint("seed ${cur.seed} · ${fmt(cur.seconds)} с · ${cur.image.width}×${cur.image.height}", Modifier.weight(1f))
-            TextButton(onClick = { c.setSource(cur.image) }) { Text("Править дальше") }
+            TextButton(onClick = { c.useSource(cur.image) }) { Text("Править дальше") }
             TextButton(onClick = {
                 DesktopMedia.chooseSave("Сохранить", cur.file.name)?.let { f -> cur.file.copyTo(f, overwrite = true) }
             }) { Text("Сохранить как…") }
