@@ -32,8 +32,18 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
+import java.io.File
+import kotlin.system.exitProcess
 
-fun main() = application {
+fun main(args: Array<String>) {
+    if (args.firstOrNull() == "--selftest") {
+        val report = File(args.getOrNull(1) ?: File(System.getProperty("java.io.tmpdir"), "neuropocket-selftest.txt").path)
+        exitProcess(SelfTest.run(report))
+    }
+    runApp()
+}
+
+private fun runApp() = application {
     val windowState = rememberWindowState(size = DpSize(1360.dp, 900.dp))
     val scope = rememberCoroutineScope()
     val state = remember { AppState(scope) }

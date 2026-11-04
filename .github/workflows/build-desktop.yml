@@ -96,7 +96,17 @@ jobs:
         shell: bash
         run: |
           chmod +x gradlew
-          ./gradlew -p desktop packageMsi packageExe --no-daemon
+          ./gradlew -p desktop createDistributable packageMsi packageExe --no-daemon
+
+      # Запуск собранного приложения в режиме самопроверки: загружаются все DLL
+      - name: Самопроверка приложения
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem desktop/build/compose/binaries/main/app -Recurse -Filter NeuroPocket.exe | Select-Object -First 1
+          $report = "$env:RUNNER_TEMP\selftest.txt"
+          $p = Start-Process -FilePath $exe.FullName -ArgumentList "--selftest", $report -Wait -PassThru
+          Get-Content $report -Encoding UTF8
+          if ($p.ExitCode -ne 0) { throw "Самопроверка не пройдена (код $($p.ExitCode))" }
 
       - name: Журналы jpackage (при ошибке)
         if: failure()
