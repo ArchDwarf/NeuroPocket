@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -44,19 +45,9 @@ fun SettingsPane(app: AppState) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp).widthIn(max = 900.dp)) {
         Text("Настройки", style = MaterialTheme.typography.titleLarge)
 
-        SectionTitle("Видеокарта")
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("Использовать видеокарту (Vulkan: NVIDIA, AMD, Intel)")
-                Hint("Ускоряет всё в 5–50 раз. Без видеокарты работает процессор.")
-            }
-            Switch(d.useGpu, { d = d.copy(useGpu = it) })
-        }
-        LabeledSlider(
-            "Слоёв чат-модели на видеокарте", if (d.gpuLayers >= 999) "все" else "${d.gpuLayers}",
-            d.gpuLayers.coerceAtMost(100).toFloat(), 0f..100f,
-        ) { d = d.copy(gpuLayers = if (it >= 99.5f) 999 else it.roundToInt()) }
-        Hint("Если модель не помещается в видеопамять — уменьшите: часть слоёв будет считать процессор.")
+        DevicesSection(app, d) { d = it }
+
+        SectionTitle("Память видеокарты")
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("Картинки и видео: держать веса в оперативной памяти")
@@ -143,4 +134,137 @@ fun SettingsPane(app: AppState) {
             )
         }
     }
+}
+
+
+/** Выбор устройств: процессор, видеокарта, видеокарта + процессор, несколько видеокарт. */
+@Composable
+private fun DevicesSection(app: AppState, d: DesktopSettings, onChange: (DesktopSettings) -> Unit) {
+    LaunchedEffect(Unit) { app.refreshDevices() }
+    val gpus = app.devices.filter { it.isGpu }
+
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        SectionTitle("Где считать нейросети", Modifier.weight(1f))
+        androidx.compose.material3.TextButton(onClick = { app.refreshDevices() }) { Text("↻ Обновить список") }
+    }
+    if (app.devices.isEmpty()) Hint("Определяем устройства…")
+    app.devices.forEach { dev ->
+        val mem = if (dev.totalMb > 0) " · ${formatSize(dev.totalMb shl 20)} (свободно ${formatSize(dev.freeMb shl 20)})" else ""
+        Text(
+            (if (dev.isGpu) "🎮 " else "🖥 ") + "${dev.name} — ${dev.description}$mem",
+            style = MaterialTheme.typography.bodyMedium,
+        )
+    }
+    if (app.devices.isNotEmpty() && gpus.isEmpty()) {
+        Hint("Видеокарта с поддержкой Vulkan не найдена — всё будет считать процессор. Обновите драйвер видеокарты.")
+    }
+
+    // ---------------- Чат ----------------
+    Text("Чат-модели", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 10.dp))
+    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        listOf("auto" to "Авто (все видеокарты)", "cpu" to "Процессор", "gpu" to "Видеокарта", "hybrid" to "Видеокарта + процессор")
+            .forEach { (k, t) -> FilterChip(selected = d.chatDevice == k, onClick = { onChange(d.copy(chatDevice = k)) }, label = { Text(t) }) }
+    }
+    when (d.chatDevice) {
+        "cpu" -> Hint("Всё считает процессор: работает на любом компьютере, но медленнее.")
+        "auto" -> Hint("Модель целиком на видеокартах; при нескольких — делится между ними по свободной памяти.")
+        "hybrid" -> Hint("Часть слоёв на видеокарте, остальное на процессоре — для моделей больше видеопамяти.")
+        else -> Hint("Выберите одну или несколько видеокарт.")
+    }
+    if ((d.chatDevice == "gpu" || d.chatDevice == "hybrid") && gpus.isNotEmpty()) {
+        val chosen = d.chatGpus.filter { n -> gpus.any { it.name == n } }.ifEmpty { gpus.map { it.name } }
+        GpuChecklist(gpus.map { it.name to it.description }, chosen) { list ->
+            onChange(d.copy(chatGpus = list, chatTensorSplit = emptyList()))
+        }
+        if (chosen.size > 1) {
+            SplitChips(d.chatSplit) { onChange(d.copy(chatSplit = it)) }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Доли модели вручную", Modifier.weight(1f))
+                Switch(d.chatTensorSplit.size == chosen.size, { on ->
+                    onChange(d.copy(chatTensorSplit = if (on) chosen.map { 1f } else emptyList()))
+                })
+            }
+            if (d.chatTensorSplit.size == chosen.size) {
+                val total = d.chatTensorSplit.sum().coerceAtLeast(0.01f)
+                chosen.forEachIndexed { i, name ->
+                    val v = d.chatTensorSplit[i]
+                    LabeledSlider(name, "${(v / total * 100).roundToInt()}%", v, 0f..1f) { nv ->
+                        onChange(d.copy(chatTensorSplit = d.chatTensorSplit.toMutableList().also { it[i] = (nv * 20).roundToInt() / 20f }))
+                    }
+                }
+            } else {
+                Hint("Сейчас доли считаются автоматически по свободной видеопамяти.")
+            }
+        }
+    }
+    if (d.chatDevice == "hybrid") {
+        LabeledSlider("Слоёв на видеокарте", "${d.gpuLayers.coerceIn(1, 200)}", d.gpuLayers.coerceIn(1, 200).toFloat(), 1f..200f) {
+            onChange(d.copy(gpuLayers = it.roundToInt()))
+        }
+        Hint("У моделей 7–8B ≈ 32 слоя, 14B ≈ 48, 30–32B ≈ 64, 70B ≈ 80. Больше слоёв на видеокарте — быстрее, но нужно больше видеопамяти.")
+    }
+
+    // ---------------- Картинки и видео ----------------
+    val sdGpus = app.sdDevices.filter { !it.first.equals("CPU", true) }
+    Text("Картинки и видео", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 12.dp))
+    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        listOf("auto" to "Авто", "cpu" to "Процессор", "gpu" to "Видеокарта").forEach { (k, t) ->
+            FilterChip(selected = d.sdDevice == k, onClick = { onChange(d.copy(sdDevice = k)) }, label = { Text(t) })
+        }
+    }
+    if (d.sdDevice == "gpu") {
+        if (sdGpus.isEmpty()) Hint("Видеокарты для картинок не найдены.")
+        else {
+            val chosen = d.sdGpus.filter { n -> sdGpus.any { it.first == n } }.ifEmpty { listOf(sdGpus.first().first) }
+            GpuChecklist(sdGpus, chosen) { onChange(d.copy(sdGpus = it)) }
+            if (chosen.size > 1) {
+                Hint("Диффузионная модель разделится между видеокартами (FLUX, Qwen-Image, Wan и др.).")
+                SplitChips(d.sdSplit) { onChange(d.copy(sdSplit = it)) }
+            }
+        }
+    }
+    if (d.sdDevice != "cpu") {
+        val targets = listOf("same" to "там же", "cpu" to "процессор") + sdGpus.map { it.first to it.first }
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 6.dp)) {
+            Text("Текстовые энкодеры (T5, Qwen и др.)", Modifier.weight(1f))
+            Dropdown("там же", targets, targets.find { it.first == d.sdTextEncoder }, { it.second }, Modifier.widthIn(min = 180.dp)) {
+                onChange(d.copy(sdTextEncoder = it.first))
+            }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("VAE (кодирование изображения)", Modifier.weight(1f))
+            Dropdown("там же", targets, targets.find { it.first == d.sdVae }, { it.second }, Modifier.widthIn(min = 180.dp)) {
+                onChange(d.copy(sdVae = it.first))
+            }
+        }
+        Hint("Энкодер на процессоре или второй видеокарте освобождает видеопамять для основной модели.")
+    }
+    val (backend, split) = Placement.sd(d)
+    Hint("Итог для картинок: ${backend.ifEmpty { "автоматически" }}${if (split.isNotEmpty()) " · деление: $split" else ""}")
+}
+
+@Composable
+private fun GpuChecklist(gpus: List<Pair<String, String>>, chosen: List<String>, onChange: (List<String>) -> Unit) {
+    gpus.forEach { (name, desc) ->
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            androidx.compose.material3.Checkbox(
+                checked = name in chosen,
+                onCheckedChange = { on ->
+                    val list = if (on) (chosen + name).distinct() else chosen - name
+                    if (list.isNotEmpty()) onChange(gpus.map { it.first }.filter { it in list })
+                },
+            )
+            Text("$name — $desc", style = MaterialTheme.typography.bodyMedium)
+        }
+    }
+}
+
+@Composable
+private fun SplitChips(current: String, onChange: (String) -> Unit) {
+    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        FilterChip(selected = current != "row", onClick = { onChange("layer") }, label = { Text("По слоям") })
+        FilterChip(selected = current == "row", onClick = { onChange("row") }, label = { Text("По строкам (параллельно)") })
+    }
+    Hint(if (current == "row") "Все видеокарты работают одновременно над каждым слоем — быстрее, если видеокарты одинаковые."
+        else "Слои распределяются между видеокартами — надёжно, подходит для разных видеокарт.")
 }

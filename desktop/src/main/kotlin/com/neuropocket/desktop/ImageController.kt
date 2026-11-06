@@ -14,6 +14,7 @@ import com.neuropocket.sd.SdProgress
 import com.neuropocket.sd.SdRequest
 import com.neuropocket.sd.SdVideoRequest
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -112,7 +113,11 @@ class ImageController(private val app: AppState, val video: Boolean) {
             profile = p
             return
         }
-        app.scope.launch {
+        app.scope.launch { loadNow(p) }
+    }
+
+    private suspend fun loadNow(p: SdProfile) {
+        run {
             cancel()
             job?.join()
             // Большие модели картинок и видео вместе в видеопамять не помещаются
@@ -129,9 +134,10 @@ class ImageController(private val app: AppState, val video: Boolean) {
                     SdLoadOptions(
                         threads = s.threads,
                         weightType = s.sdWeightType,
-                        backend = if (s.useGpu) "" else "cpu",
+                        backend = Placement.sd(s).first,
                         paramsBackend = if (s.sdOffloadToCpu) "cpu" else "",
                         maxVramGb = s.sdMaxVram,
+                        splitMode = Placement.sd(s).second,
                     ),
                 )
                 profile = p
@@ -142,6 +148,68 @@ class ImageController(private val app: AppState, val video: Boolean) {
             }
         }
     }
+
+    /**
+     * Готовит модель для рисования из чата: выбранный профиль картинок
+     * (или первый подходящий) — загружает и ждёт. Возвращает текст ошибки или null.
+     */
+    suspend fun awaitReady(): String? {
+        while (state is SdLoadState.Loading) delay(200)
+        if (state is SdLoadState.Ready && engine.isLoaded) return null
+        val name = app.settings.imageProfile
+        val p = profiles.find { it.name == name && filesPresent(it) } ?: profiles.firstOrNull { filesPresent(it) }
+            ?: return if (profiles.isEmpty()) "Нет модели для картинок" else "Файлы модели картинок ещё не скачаны"
+        if (p.name != name) app.updateSettings(app.settings.copy(imageProfile = p.name))
+        loadNow(p)
+        return (state as? SdLoadState.Error)?.message
+    }
+
+    private fun filesPresent(p: SdProfile) = p.files.toMap().values.filterNotNull().all { File(it).exists() }
+
+    /** Рисует по описанию или (если есть [src]) изменяет фото — для чата. */
+    suspend fun generateForChat(prompt: String, src: BufferedImage?, onProgress: (Int, Int) -> Unit): ImageResult? {
+        if (running) return null
+        running = true
+        val started = System.currentTimeMillis()
+        try {
+            val chatMode = when {
+                src == null -> SdMode.TEXT
+                canEdit -> SdMode.INSTRUCT
+                else -> SdMode.REDRAW
+            }
+            val seed = Random.nextLong(0, Int.MAX_VALUE.toLong())
+            val req = withContext(Dispatchers.Default) {
+                if (src != null) {
+                    val fitted = DesktopMedia.fitForDiffusion(src, maxOf(width, height))
+                    SdRequest(
+                        prompt = prompt, negative = if (cfg > 1f) negative.trim() else "",
+                        width = fitted.width, height = fitted.height, steps = steps, cfg = cfg, seed = seed,
+                        sampler = sampler, mode = chatMode, strength = 0.6f, imageCfg = imageCfg,
+                        vaeTiling = app.settings.sdVaeTiling, image = DesktopMedia.toRgb(fitted),
+                    )
+                } else {
+                    SdRequest(
+                        prompt = prompt, negative = if (cfg > 1f) negative.trim() else "",
+                        width = width / 64 * 64, height = height / 64 * 64, steps = steps, cfg = cfg, seed = seed,
+                        sampler = sampler, vaeTiling = app.settings.sdVaeTiling,
+                    )
+                }
+            }
+            val img = engine.generate(req, SdProgress { st, total, _ -> onProgress(st, total) }) ?: return null
+            val bi = withContext(Dispatchers.Default) { DesktopMedia.fromRgb(img.rgb, img.width, img.height) }
+            val file = File(Paths.outputs, "images/${stamp()}_$seed.png")
+            withContext(Dispatchers.IO) { DesktopMedia.savePng(bi, file) }
+            val r = ImageResult(bi, bi.toComposeImageBitmap(), file, seed, (System.currentTimeMillis() - started) / 1000f)
+            results.add(0, r)
+            if (results.size > 30) results.removeAt(results.lastIndex)
+            current = r
+            return r
+        } finally {
+            running = false
+        }
+    }
+
+    val archName: String get() = (state as? SdLoadState.Ready)?.arch ?: ""
 
     private fun applyDefaults(p: SdProfile) {
         steps = p.steps
@@ -158,6 +226,8 @@ class ImageController(private val app: AppState, val video: Boolean) {
     }
 
     fun backendName(): String = SdLibrary.loadedVariant
+
+    suspend fun listDevices(): List<Pair<String, String>> = engine.listDevices()
 
     // ===================== Исходник =====================
 

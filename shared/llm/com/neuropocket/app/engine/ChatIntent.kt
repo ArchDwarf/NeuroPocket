@@ -1,4 +1,4 @@
-package com.neuropocket.app.ui
+package com.neuropocket.app.engine
 
 /** Распознаёт в сообщении просьбу нарисовать картинку или изменить фото. */
 object ChatIntent {

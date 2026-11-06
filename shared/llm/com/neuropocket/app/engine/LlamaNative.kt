@@ -26,7 +26,18 @@ internal object LlamaNative {
     external fun init(nativeLibDir: String)
     external fun systemInfo(): String
     external fun mediaMarker(): String
-    external fun load(path: String, mmprojPath: String?, nCtx: Int, nThreads: Int, nGpuLayers: Int): Long
+    external fun listDevices(): Array<String>
+    external fun load(
+        path: String,
+        mmprojPath: String?,
+        nCtx: Int,
+        nThreads: Int,
+        nGpuLayers: Int,
+        devices: Array<String>?,
+        splitMode: Int,
+        mainGpu: Int,
+        tensorSplit: FloatArray?,
+    ): Long
     external fun hasVision(handle: Long): Boolean
     external fun free(handle: Long)
     external fun modelInfo(handle: Long): String

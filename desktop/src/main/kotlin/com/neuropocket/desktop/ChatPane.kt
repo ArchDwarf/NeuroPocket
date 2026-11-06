@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
@@ -62,7 +63,8 @@ fun ChatPane(app: AppState) {
             Column(Modifier.weight(1f)) {
                 Text("Чат", style = MaterialTheme.typography.titleLarge)
                 val sub = when (val s = c.state) {
-                    is LoadState.Ready -> (if (s.vision) "👁 " else "") + s.info.replace("\n", " · ")
+                    is LoadState.Ready -> (if (s.vision) "👁 " else "") + s.info.replace("\n", " · ") +
+                        " · ⚙ " + Placement.chatLabel(app.settings, app.devices)
                     is LoadState.Loading -> "Загрузка ${s.name}…"
                     is LoadState.Error -> "Ошибка: ${s.message}"
                     LoadState.None -> "Модель не выбрана"
@@ -90,21 +92,25 @@ fun ChatPane(app: AppState) {
                     Spacer(Modifier.height(12.dp))
                     Text("Загружаем модель…")
                 }
-                c.state !is LoadState.Ready && c.messages.isEmpty() -> Column(
+                c.messages.isNotEmpty() -> MessageList(app)
+                c.state !is LoadState.Ready -> Column(
                     Modifier.align(Alignment.Center).padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    Text("Выберите чат-модель вверху или скачайте её во вкладке «Модели».", textAlign = TextAlign.Center)
+                    Text(
+                        "Выберите чат-модель вверху или скачайте её во вкладке «Модели».\n" +
+                            "Рисовать можно и без неё: включите 🎨 и опишите картинку.",
+                        textAlign = TextAlign.Center,
+                    )
                     Spacer(Modifier.height(12.dp))
                     Button(onClick = { app.tab = Tab.MODELS }) { Text("Перейти к моделям") }
                 }
-                c.messages.isEmpty() -> Text(
+                else -> Text(
                     "Модель работает на вашем компьютере — без интернета.\n" +
-                        (if (c.vision) "Можно прикрепить фото и видео (📎)." else "") +
-                        "\nEnter — отправить, Shift+Enter — новая строка.",
+                        "Прикрепите фото или видео (📎), попросите нарисовать («нарисуй кота в космосе») или включите 🎨.\n" +
+                        "Enter — отправить, Shift+Enter — новая строка.",
                     Modifier.align(Alignment.Center).padding(32.dp), textAlign = TextAlign.Center,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                else -> MessageList(app)
             }
         }
 
@@ -172,12 +178,34 @@ private fun Bubble(app: AppState, m: Msg, typing: Boolean) {
                             modifier = Modifier.padding(bottom = 6.dp).clickable { open = !open },
                         )
                     }
+                    m.image?.let { r ->
+                        Image(
+                            r.bitmap, "Нарисованное изображение", contentScale = ContentScale.Fit,
+                            modifier = Modifier.widthIn(max = 640.dp).heightIn(max = 640.dp).clip(RoundedCornerShape(10.dp)),
+                        )
+                        Row {
+                            TextButton(onClick = { app.chat.attachResult(r) }) { Text("✏ Изменить") }
+                            TextButton(onClick = {
+                                DesktopMedia.chooseSave("Сохранить", r.file.name)?.let { f -> r.file.copyTo(f, overwrite = true) }
+                            }) { Text("💾 Сохранить как…") }
+                            TextButton(onClick = { DesktopMedia.openFolder(r.file.parentFile) }) { Text("📂 Папка") }
+                            TextButton(onClick = { app.images.current = r; app.tab = Tab.IMAGES }) { Text("🎨 В «Картинки»") }
+                        }
+                    }
+                    if (typing && m.text.startsWith("🎨")) {
+                        androidx.compose.material3.LinearProgressIndicator(Modifier.widthIn(min = 240.dp).padding(vertical = 6.dp))
+                    }
                     when {
                         answer.isNotEmpty() -> SelectionContainer { Text(answer) }
                         typing -> Row(verticalAlignment = Alignment.CenterVertically) {
                             CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
                             Spacer(Modifier.size(8.dp))
                             Text("думает…", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    m.action?.let { a ->
+                        FilledTonalButton(onClick = { app.tab = Tab.MODELS }, modifier = Modifier.padding(top = 6.dp)) {
+                            Text(if (a == MsgAction.IMAGE_MODELS) "Скачать модель для картинок" else "Выбрать модель со зрением 👁")
                         }
                     }
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
@@ -225,7 +253,7 @@ private fun Thumb(a: DAttachment, size: Int, onRemove: (() -> Unit)? = null) {
 private fun InputArea(app: AppState) {
     val c = app.chat
     val sp = app.speech
-    val ready = c.state is LoadState.Ready
+    val ready = c.inputEnabled
     Surface(tonalElevation = 3.dp) {
         Column(Modifier.fillMaxWidth().padding(12.dp)) {
             if (c.pending.isNotEmpty() || c.attachLoading) {
@@ -239,8 +267,14 @@ private fun InputArea(app: AppState) {
             }
             Row(verticalAlignment = Alignment.Bottom) {
                 TextButton(onClick = c::attachFromDialog, enabled = ready && !c.generating) {
-                    Text(if (c.vision) "📎" else "📎", fontWeight = FontWeight.Bold)
+                    Text("📎", fontWeight = FontWeight.Bold)
                 }
+                Box(
+                    Modifier.padding(bottom = 6.dp).size(40.dp).clip(RoundedCornerShape(20.dp))
+                        .background(if (c.drawMode) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
+                        .clickable(enabled = ready && !c.generating) { c.drawMode = !c.drawMode },
+                    contentAlignment = Alignment.Center,
+                ) { Text("🎨") }
                 OutlinedTextField(
                     value = c.input,
                     onValueChange = { c.input = it },
@@ -249,7 +283,16 @@ private fun InputArea(app: AppState) {
                             c.send(); true
                         } else false
                     },
-                    placeholder = { Text(if (ready) "Сообщение" else "Модель не загружена") },
+                    placeholder = {
+                        Text(
+                            when {
+                                !ready -> "Модель не загружена"
+                                c.drawMode && c.pending.isNotEmpty() -> "Что изменить на фото?"
+                                c.drawMode -> "Что нарисовать?"
+                                else -> "Сообщение"
+                            }
+                        )
+                    },
                     enabled = ready,
                     maxLines = 8,
                     shape = RoundedCornerShape(16.dp),

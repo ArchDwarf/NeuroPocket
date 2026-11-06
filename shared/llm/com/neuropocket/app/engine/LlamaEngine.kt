@@ -21,6 +21,33 @@ data class ChatTurn(val role: String, val content: String, val images: List<Chat
 
 data class LoadedModel(val info: String, val hasVision: Boolean)
 
+/** Устройство для вычислений (процессор, видеокарта…). */
+data class ComputeDevice(
+    val name: String,
+    val description: String,
+    /** 0 — процессор, 1 — видеокарта, 2 — встроенная видеокарта, 3 — ускоритель. */
+    val type: Int,
+    val freeMb: Long,
+    val totalMb: Long,
+) {
+    val isGpu: Boolean get() = type == 1 || type == 2 || type == 3
+}
+
+/**
+ * Где считать модель.
+ * [devices] — null: все видеокарты; пустой список: только процессор.
+ * [gpuLayers] — сколько слоёв на видеокартах (остальное — процессор); 999 — все.
+ * [splitMode] — 0 одна видеокарта, 1 по слоям, 2 по строкам (видеокарты работают параллельно).
+ * [tensorSplit] — доли модели для каждой видеокарты из [devices]; null — по свободной памяти.
+ */
+data class DevicePlacement(
+    val devices: List<String>? = null,
+    val gpuLayers: Int = 0,
+    val splitMode: Int = 1,
+    val mainGpu: Int = 0,
+    val tensorSplit: List<Float>? = null,
+)
+
 data class SamplingParams(
     val temperature: Float = 0.7f,
     val topP: Float = 0.9f,
@@ -61,6 +88,15 @@ class LlamaEngine(private val nativeLibDir: String) {
         }
     }
 
+    suspend fun listDevices(): List<ComputeDevice> = withContext(dispatcher) {
+        ensureInit()
+        LlamaNative.listDevices().mapNotNull { line ->
+            val p = line.split('\t')
+            if (p.size < 5) null
+            else ComputeDevice(p[0], p[1], p[2].toIntOrNull() ?: 0, p[3].toLongOrNull() ?: 0, p[4].toLongOrNull() ?: 0)
+        }
+    }
+
     suspend fun systemInfo(): String = withContext(dispatcher) {
         ensureInit()
         LlamaNative.systemInfo()
@@ -73,6 +109,7 @@ class LlamaEngine(private val nativeLibDir: String) {
         contextSize: Int,
         threads: Int,
         gpuLayers: Int = 0,
+        placement: DevicePlacement? = null,
     ): LoadedModel =
         withContext(dispatcher) {
             ensureInit()
@@ -80,7 +117,11 @@ class LlamaEngine(private val nativeLibDir: String) {
                 LlamaNative.free(handle)
                 handle = 0L
             }
-            val h = LlamaNative.load(path, mmprojPath, contextSize, threads, gpuLayers)
+            val pl = placement ?: DevicePlacement(gpuLayers = gpuLayers)
+            val h = LlamaNative.load(
+                path, mmprojPath, contextSize, threads, pl.gpuLayers,
+                pl.devices?.toTypedArray(), pl.splitMode, pl.mainGpu, pl.tensorSplit?.toFloatArray(),
+            )
             if (h == 0L) {
                 throw IllegalStateException(
                     "Не удалось загрузить модель. Файл повреждён, архитектура не " +

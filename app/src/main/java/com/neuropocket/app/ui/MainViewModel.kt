@@ -22,6 +22,7 @@ import com.neuropocket.app.data.ModelKind
 import com.neuropocket.app.data.ModelRepository
 import com.neuropocket.app.data.Settings
 import com.neuropocket.app.engine.ChatImage
+import com.neuropocket.app.engine.ChatIntent
 import com.neuropocket.app.engine.ChatTurn
 import com.neuropocket.app.engine.GenEvent
 import com.neuropocket.app.engine.LlamaEngine

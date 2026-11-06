@@ -1,5 +1,6 @@
 package com.neuropocket.desktop
 
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
@@ -42,6 +43,23 @@ data class DesktopSettings(
     val sdVaeTiling: Boolean = true,
     val sdWeightType: String = "",
     val sdMaxVram: String = "",
+    // ----- Где считать (устройства) -----
+    /** Чат: auto — все видеокарты; cpu — процессор; gpu — выбранные видеокарты; hybrid — видеокарты + процессор. */
+    val chatDevice: String = "auto",
+    /** Выбранные видеокарты для чата (пусто — все). */
+    val chatGpus: List<String> = emptyList(),
+    /** Деление между видеокартами: layer — по слоям, row — по строкам (параллельно). */
+    val chatSplit: String = "layer",
+    /** Доли модели по видеокартам (в порядке chatGpus); пусто — по свободной памяти. */
+    val chatTensorSplit: List<Float> = emptyList(),
+    /** Картинки/видео: auto, cpu, gpu (выбранные видеокарты). */
+    val sdDevice: String = "auto",
+    val sdGpus: List<String> = emptyList(),
+    /** Где текстовые энкодеры: same — там же, cpu — процессор, или имя устройства. */
+    val sdTextEncoder: String = "same",
+    /** Где VAE: same, cpu или имя устройства. */
+    val sdVae: String = "same",
+    val sdSplit: String = "layer",
     // ----- Картинки и видео -----
     val imageProfile: String = "",
     val videoProfile: String = "",
@@ -60,12 +78,18 @@ data class DesktopSettings(
         put("visionMaxSide", visionMaxSide); put("videoFrames", videoFrames)
         put("useGpu", useGpu); put("gpuLayers", gpuLayers); put("sdOffloadToCpu", sdOffloadToCpu)
         put("sdVaeTiling", sdVaeTiling); put("sdWeightType", sdWeightType); put("sdMaxVram", sdMaxVram)
+        put("chatDevice", chatDevice); put("chatGpus", JSONArray(chatGpus)); put("chatSplit", chatSplit)
+        put("chatTensorSplit", JSONArray(chatTensorSplit.map { it.toDouble() }))
+        put("sdDevice", sdDevice); put("sdGpus", JSONArray(sdGpus)); put("sdTextEncoder", sdTextEncoder)
+        put("sdVae", sdVae); put("sdSplit", sdSplit)
         put("imageProfile", imageProfile); put("videoProfile", videoProfile)
         put("asrModelDir", asrModelDir); put("ttsModelDir", ttsModelDir); put("ttsSpeed", ttsSpeed.toDouble())
         put("autoSpeak", autoSpeak); put("hfToken", hfToken)
     }
 
     companion object {
+        private fun strings(a: JSONArray?): List<String> = if (a == null) emptyList() else List(a.length()) { a.getString(it) }
+
         fun load(): DesktopSettings {
             val d = DesktopSettings()
             val f = Paths.settingsFile
@@ -90,6 +114,15 @@ data class DesktopSettings(
                     sdVaeTiling = o.optBoolean("sdVaeTiling", d.sdVaeTiling),
                     sdWeightType = o.optString("sdWeightType", ""),
                     sdMaxVram = o.optString("sdMaxVram", ""),
+                    chatDevice = o.optString("chatDevice", if (o.optBoolean("useGpu", true)) "auto" else "cpu"),
+                    chatGpus = strings(o.optJSONArray("chatGpus")),
+                    chatSplit = o.optString("chatSplit", "layer"),
+                    chatTensorSplit = o.optJSONArray("chatTensorSplit")?.let { a -> List(a.length()) { a.getDouble(it).toFloat() } } ?: emptyList(),
+                    sdDevice = o.optString("sdDevice", if (o.optBoolean("useGpu", true)) "auto" else "cpu"),
+                    sdGpus = strings(o.optJSONArray("sdGpus")),
+                    sdTextEncoder = o.optString("sdTextEncoder", "same"),
+                    sdVae = o.optString("sdVae", "same"),
+                    sdSplit = o.optString("sdSplit", "layer"),
                     imageProfile = o.optString("imageProfile", ""),
                     videoProfile = o.optString("videoProfile", ""),
                     asrModelDir = o.optString("asrModelDir", ""),

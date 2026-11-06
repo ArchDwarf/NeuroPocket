@@ -220,16 +220,87 @@ Java_com_neuropocket_app_engine_LlamaNative_mediaMarker(JNIEnv *env, jobject) {
     return env->NewStringUTF(mtmd_default_marker());
 }
 
+/**
+ * Список устройств: "имя\tописание\tтип\tсвободно_МБ\tвсего_МБ".
+ * Тип: 0 — процессор, 1 — видеокарта, 2 — встроенная видеокарта, 3 — ускоритель.
+ */
+JNIEXPORT jobjectArray JNICALL
+Java_com_neuropocket_app_engine_LlamaNative_listDevices(JNIEnv *env, jobject) {
+    size_t n = ggml_backend_dev_count();
+    jobjectArray out = env->NewObjectArray((jsize) n, env->FindClass("java/lang/String"), nullptr);
+    for (size_t i = 0; i < n; ++i) {
+        ggml_backend_dev_t d = ggml_backend_dev_get(i);
+        size_t free_b = 0, total_b = 0;
+        ggml_backend_dev_memory(d, &free_b, &total_b);
+        int type = 0;
+        switch (ggml_backend_dev_type(d)) {
+            case GGML_BACKEND_DEVICE_TYPE_GPU: type = 1; break;
+            case GGML_BACKEND_DEVICE_TYPE_IGPU: type = 2; break;
+            case GGML_BACKEND_DEVICE_TYPE_ACCEL: type = 3; break;
+            default: type = 0;
+        }
+        char buf[512];
+        snprintf(buf, sizeof(buf), "%s\t%s\t%d\t%zu\t%zu",
+                 ggml_backend_dev_name(d), ggml_backend_dev_description(d), type,
+                 free_b / (1024 * 1024), total_b / (1024 * 1024));
+        jstring js = env->NewStringUTF(buf);
+        env->SetObjectArrayElement(out, (jsize) i, js);
+        env->DeleteLocalRef(js);
+    }
+    return out;
+}
+
+/**
+ * Загрузка модели.
+ * nGpuLayers — сколько слоёв отдать видеокартам (0 — всё на процессоре, 999 — все);
+ * devices — имена устройств для вычислений (null — все доступные, пустой массив — только процессор);
+ * splitMode — 0 одна видеокарта, 1 по слоям, 2 по строкам (параллельно);
+ * tensorSplit — доли модели для каждого устройства из devices (null — по свободной памяти).
+ */
 JNIEXPORT jlong JNICALL
 Java_com_neuropocket_app_engine_LlamaNative_load(JNIEnv *env, jobject, jstring jpath, jstring jmmproj,
-                                                 jint nCtx, jint nThreads, jint nGpuLayers) {
+                                                 jint nCtx, jint nThreads, jint nGpuLayers,
+                                                 jobjectArray jdevices, jint splitMode, jint mainGpu,
+                                                 jfloatArray jtensorSplit) {
     std::string path = jstring_to_std(env, jpath);
     std::string mmproj = jstring_to_std(env, jmmproj);
     g_abort.store(false);
 
     llama_model_params mp = llama_model_default_params();
-    // 0 — всё на процессоре (телефон); >0 — сколько слоёв отдать видеокарте (компьютер)
     mp.n_gpu_layers = nGpuLayers;
+
+    // Выбор устройств
+    std::vector<ggml_backend_dev_t> devices;
+    bool custom_devices = jdevices != nullptr;
+    if (custom_devices) {
+        jsize nd = env->GetArrayLength(jdevices);
+        for (jsize i = 0; i < nd; ++i) {
+            auto jn = (jstring) env->GetObjectArrayElement(jdevices, i);
+            std::string name = jstring_to_std(env, jn);
+            env->DeleteLocalRef(jn);
+            for (size_t k = 0; k < ggml_backend_dev_count(); ++k) {
+                ggml_backend_dev_t d = ggml_backend_dev_get(k);
+                if (name == ggml_backend_dev_name(d) && ggml_backend_dev_type(d) != GGML_BACKEND_DEVICE_TYPE_CPU) {
+                    devices.push_back(d);
+                    break;
+                }
+            }
+        }
+        if (devices.empty()) mp.n_gpu_layers = 0;
+        devices.push_back(nullptr);
+        mp.devices = devices.data();
+    }
+    if (splitMode >= 0 && splitMode <= 2) mp.split_mode = (llama_split_mode) splitMode;
+    mp.main_gpu = mainGpu;
+    std::vector<float> split(llama_max_devices(), 0.0f);
+    if (jtensorSplit) {
+        jsize ns = env->GetArrayLength(jtensorSplit);
+        std::vector<float> tmp(ns);
+        env->GetFloatArrayRegion(jtensorSplit, 0, ns, tmp.data());
+        for (jsize i = 0; i < ns && i < (jsize) split.size(); ++i) split[i] = tmp[i];
+        mp.tensor_split = split.data();
+    }
+    bool gpu_used = mp.n_gpu_layers != 0 && !(custom_devices && devices.size() <= 1);
     llama_model *model = llama_model_load_from_file(path.c_str(), mp);
     if (!model) {
         LOGE("Не удалось загрузить модель %s", path.c_str());
@@ -267,7 +338,7 @@ Java_com_neuropocket_app_engine_LlamaNative_load(JNIEnv *env, jobject, jstring j
 
     if (!mmproj.empty()) {
         mtmd_context_params mparams = mtmd_context_params_default();
-        mparams.use_gpu = nGpuLayers > 0;
+        mparams.use_gpu = gpu_used;
         mparams.n_threads = nThreads;
         mparams.print_timings = false;
         mparams.warmup = false;

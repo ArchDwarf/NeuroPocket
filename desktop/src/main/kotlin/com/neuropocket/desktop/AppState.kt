@@ -9,6 +9,7 @@ import com.neuropocket.app.data.HfModelFile
 import com.neuropocket.app.data.HfRepo
 import com.neuropocket.app.data.HuggingFace
 import com.neuropocket.app.data.ModelKind
+import com.neuropocket.app.engine.ComputeDevice
 import com.neuropocket.sd.SdLibrary
 import com.neuropocket.speech.HttpDownloader
 import kotlinx.coroutines.CancellationException
@@ -49,7 +50,7 @@ class AppState(val scope: CoroutineScope) {
 
     init {
         // Выбор версии stable-diffusion.cpp (Vulkan или CPU) — до первой загрузки модели
-        SdLibrary.preferGpu = settings.useGpu
+        SdLibrary.preferGpu = settings.sdDevice != "cpu"
     }
 
     val chat = ChatController(this)
@@ -65,12 +66,34 @@ class AppState(val scope: CoroutineScope) {
         val old = settings
         settings = new
         new.save()
-        if (old.useGpu != new.useGpu) {
-            toast("Переключение видеокарты для картинок и видео применится после перезапуска приложения")
+        if ((old.sdDevice == "cpu") != (new.sdDevice == "cpu") && SdLibrary.loadedVariant.isNotEmpty()) {
+            toast("Переключение картинок и видео между процессором и видеокартой применится после перезапуска приложения")
         }
-        if (old.contextSize != new.contextSize || old.threads != new.threads ||
-            old.gpuLayers != new.gpuLayers || old.useGpu != new.useGpu
+        if (old.contextSize != new.contextSize || old.threads != new.threads || old.gpuLayers != new.gpuLayers ||
+            old.chatDevice != new.chatDevice || old.chatGpus != new.chatGpus || old.chatSplit != new.chatSplit ||
+            old.chatTensorSplit != new.chatTensorSplit
         ) chat.reloadIfLoaded()
+        if (old.sdDevice != new.sdDevice || old.sdGpus != new.sdGpus || old.sdTextEncoder != new.sdTextEncoder ||
+            old.sdVae != new.sdVae || old.sdSplit != new.sdSplit || old.sdOffloadToCpu != new.sdOffloadToCpu ||
+            old.sdWeightType != new.sdWeightType || old.sdMaxVram != new.sdMaxVram
+        ) {
+            if (images.isLoaded) images.reload()
+            if (video.isLoaded) video.reload()
+        }
+    }
+
+    // ===================== Устройства =====================
+
+    /** Устройства, которые видит llama.cpp (с объёмом памяти). */
+    var devices by mutableStateOf<List<ComputeDevice>>(emptyList()); private set
+    /** Устройства, которые видит stable-diffusion.cpp. */
+    var sdDevices by mutableStateOf<List<Pair<String, String>>>(emptyList()); private set
+
+    fun refreshDevices() {
+        scope.launch {
+            devices = runCatching { chat.listDevices() }.getOrDefault(emptyList())
+            sdDevices = runCatching { images.listDevices() }.getOrDefault(emptyList())
+        }
     }
 
     // ===================== Модели на диске =====================
@@ -284,6 +307,10 @@ class AppState(val scope: CoroutineScope) {
 
     init {
         refreshModels()
-        chat.autoload()
+        scope.launch {
+            // Сначала узнаём устройства — от них зависит, где загружать чат-модель
+            devices = runCatching { chat.listDevices() }.getOrDefault(emptyList())
+            chat.autoload()
+        }
     }
 }

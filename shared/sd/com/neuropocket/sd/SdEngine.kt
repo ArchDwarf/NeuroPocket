@@ -19,6 +19,7 @@ internal object SdNative {
     }
 
     external fun systemInfo(): String
+    external fun listDevices(): String
     external fun load(keys: Array<String>, values: Array<String>): Long
     external fun free(handle: Long)
     external fun modelName(handle: Long): String
@@ -123,6 +124,8 @@ data class SdLoadOptions(
     val paramsBackend: String = "",
     /** Ограничение видеопамяти в ГБ ("" — без ограничения). */
     val maxVramGb: String = "",
+    /** Как делить модуль между несколькими видеокартами: layer / row ("" — по умолчанию). */
+    val splitMode: String = "",
 )
 
 data class SdModelInfo(val arch: String, val canImage: Boolean, val canVideo: Boolean)
@@ -192,6 +195,13 @@ class SdEngine {
 
     suspend fun systemInfo(): String = withContext(dispatcher) { SdNative.systemInfo() }
 
+    /** Устройства, которые видит stable-diffusion.cpp: пары (имя, описание), например ("Vulkan0", "NVIDIA …"). */
+    suspend fun listDevices(): List<Pair<String, String>> = withContext(dispatcher) {
+        SdNative.listDevices().lines().filter { it.isNotBlank() }.map { l ->
+            l.substringBefore('\t') to l.substringAfter('\t', "")
+        }
+    }
+
     /** Загружает модель из одного или нескольких файлов. */
     suspend fun load(files: SdModelFiles, options: SdLoadOptions = SdLoadOptions()): SdModelInfo =
         withContext(dispatcher) {
@@ -206,6 +216,7 @@ class SdEngine {
             if (options.backend.isNotBlank()) kv["backend"] = options.backend
             if (options.paramsBackend.isNotBlank()) kv["params_backend"] = options.paramsBackend
             if (options.maxVramGb.isNotBlank()) kv["max_vram"] = options.maxVramGb
+            if (options.splitMode.isNotBlank()) kv["split_mode"] = options.splitMode
             val h = SdNative.load(kv.keys.toTypedArray(), kv.values.toTypedArray())
             if (h == 0L) {
                 throw IllegalStateException(

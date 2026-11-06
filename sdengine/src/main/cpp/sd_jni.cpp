@@ -152,12 +152,22 @@ Java_com_neuropocket_sd_SdNative_systemInfo(JNIEnv *env, jobject) {
     return env->NewStringUTF(info.c_str());
 }
 
+/** Список устройств: строки "имя\tописание". */
+JNIEXPORT jstring JNICALL
+Java_com_neuropocket_sd_SdNative_listDevices(JNIEnv *env, jobject) {
+    std::vector<char> buf(sd_list_devices(nullptr, 0) + 1);
+    sd_list_devices(buf.data(), buf.size());
+    return env->NewStringUTF(buf.data());
+}
+
 /**
  * Загружает модель. keys/values — пути к компонентам и параметры:
  *   model, diffusion_model, high_noise_diffusion_model, vae, taesd, clip_l, clip_g,
  *   clip_vision, t5xxl, llm, llm_vision — пути к файлам;
  *   threads, wtype (f16/q8_0/q4_0…), backend (cpu / vulkan0 / пусто = авто),
  *   params_backend (cpu — держать веса в ОЗУ), max_vram (ГБ), flash_attn (auto/on/off),
+ *   split_mode (layer / row — как делить модуль между несколькими видеокартами),
+ *   backend может быть составным: "all=Vulkan0,te=CPU,diffusion=Vulkan0&Vulkan1",
  *   vae_tiling (1/0) — сохраняется и применяется при генерации.
  */
 JNIEXPORT jlong JNICALL
@@ -203,6 +213,7 @@ Java_com_neuropocket_sd_SdNative_load(JNIEnv *env, jobject, jobjectArray jkeys, 
     if (get("backend")) p.backend = get("backend");
     if (get("params_backend")) p.params_backend = get("params_backend");
     if (get("max_vram")) p.max_vram = get("max_vram");
+    if (get("split_mode")) p.split_mode = get("split_mode");
 
     if (!p.model_path && !p.diffusion_model_path) {
         log_msg(PRIO_ERROR, "Не указан файл модели");
