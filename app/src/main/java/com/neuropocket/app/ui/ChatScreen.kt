@@ -15,6 +15,10 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import com.neuropocket.app.data.Attachment
 import com.neuropocket.app.data.AttachmentKind
+import com.neuropocket.app.data.ModelKind
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -65,7 +69,7 @@ import androidx.compose.ui.unit.dp
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ChatScreen(vm: MainViewModel, modifier: Modifier, onOpenModels: () -> Unit) {
+fun ChatScreen(vm: MainViewModel, modifier: Modifier, onOpenModels: (ModelKind) -> Unit) {
     val state = vm.modelState
     Column(modifier.fillMaxSize().imePadding()) {
         TopAppBar(
@@ -98,22 +102,22 @@ fun ChatScreen(vm: MainViewModel, modifier: Modifier, onOpenModels: () -> Unit) 
 
         Box(Modifier.weight(1f).fillMaxWidth()) {
             when {
-                state !is ModelState.Ready -> ModelPlaceholder(state, onOpenModels, vm::reloadModel)
-                vm.messages.isEmpty() -> Text(
+                vm.messages.isNotEmpty() -> MessageList(vm, onOpenModels)
+                state !is ModelState.Ready -> ModelPlaceholder(state, { onOpenModels(ModelKind.CHAT) }, vm::reloadModel)
+                else -> Text(
                     "Модель работает прямо на телефоне — без интернета.\n" +
-                        (if ((state as? ModelState.Ready)?.hasVision == true) "Напишите что-нибудь или прикрепите фото/видео (＋)."
-                        else "Напишите что-нибудь."),
+                        "Напишите что-нибудь, прикрепите фото (＋) или попросите нарисовать картинку («нарисуй кота») — " +
+                        "либо включите 🎨.",
                     Modifier.align(Alignment.Center).padding(32.dp),
                     textAlign = TextAlign.Center,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                else -> MessageList(vm)
             }
         }
 
         InputBar(
             vm = vm,
-            enabled = state is ModelState.Ready,
+            enabled = vm.inputEnabled,
             generating = vm.isGenerating,
         )
     }
@@ -151,7 +155,7 @@ private fun ModelPlaceholder(state: ModelState, onOpenModels: () -> Unit, onRetr
 }
 
 @Composable
-private fun MessageList(vm: MainViewModel) {
+private fun MessageList(vm: MainViewModel, onOpenModels: (ModelKind) -> Unit) {
     val listState = rememberLazyListState()
     val last = vm.messages.lastOrNull()
     LaunchedEffect(vm.messages.size, last?.text?.length) {
@@ -171,6 +175,9 @@ private fun MessageList(vm: MainViewModel) {
                 onSpeak = if (!typing && msg.role == Role.ASSISTANT && !msg.isError && msg.text.isNotBlank()) {
                     { if (vm.speech.speakingId == msg.id) vm.speech.stopSpeaking() else vm.speech.speak(msg.id, msg.text) }
                 } else null,
+                onSave = { bmp -> vm.studio.save(bmp) },
+                onEditFurther = { bmp -> vm.attachBitmap(bmp); vm.drawMode = true },
+                onAction = { a -> onOpenModels(if (a == ChatAction.IMAGE_MODELS) ModelKind.IMAGE else ModelKind.CHAT) },
             )
         }
     }
@@ -189,7 +196,15 @@ private fun splitThinking(text: String): Pair<String?, String> {
 }
 
 @Composable
-private fun MessageBubble(msg: ChatMessage, typing: Boolean, speaking: Boolean = false, onSpeak: (() -> Unit)? = null) {
+private fun MessageBubble(
+    msg: ChatMessage,
+    typing: Boolean,
+    speaking: Boolean = false,
+    onSpeak: (() -> Unit)? = null,
+    onSave: (android.graphics.Bitmap) -> Unit = {},
+    onEditFurther: (android.graphics.Bitmap) -> Unit = {},
+    onAction: (ChatAction) -> Unit = {},
+) {
     val isUser = msg.role == Role.USER
     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start) {
         Surface(
@@ -226,9 +241,31 @@ private fun MessageBubble(msg: ChatMessage, typing: Boolean, speaking: Boolean =
                                 .clickable { expanded = !expanded },
                         )
                     }
+                    msg.image?.let { bmp ->
+                        Image(
+                            bitmap = bmp.asImageBitmap(),
+                            contentDescription = "Нарисованное изображение",
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.fillMaxWidth()
+                                .aspectRatio(bmp.width.toFloat() / bmp.height)
+                                .clip(RoundedCornerShape(10.dp)),
+                        )
+                        Row {
+                            TextButton(onClick = { onSave(bmp) }) { Text("💾 Сохранить") }
+                            TextButton(onClick = { onEditFurther(bmp) }) { Text("✏ Изменить") }
+                        }
+                    }
                     when {
                         answer.isNotEmpty() -> SelectionContainer { Text(answer) }
                         typing -> TypingDots()
+                    }
+                    if (typing && msg.text.startsWith("🎨")) {
+                        LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 6.dp))
+                    }
+                    msg.action?.let { a ->
+                        FilledTonalButton(onClick = { onAction(a) }, modifier = Modifier.padding(top = 6.dp)) {
+                            Text(if (a == ChatAction.IMAGE_MODELS) "Скачать модель для картинок" else "Выбрать модель со зрением 👁")
+                        }
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         msg.stats?.let {
@@ -356,27 +393,33 @@ private fun InputBar(vm: MainViewModel, enabled: Boolean, generating: Boolean) {
                 verticalAlignment = Alignment.Bottom,
             ) {
                 IconButton(
-                    onClick = {
-                        if (vm.canAttach) {
-                            picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
-                        } else {
-                            vm.attach(emptyList()) // покажет подсказку
-                        }
-                    },
+                    onClick = { picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)) },
                     enabled = enabled && !generating,
-                    modifier = Modifier.padding(bottom = 4.dp),
+                    modifier = Modifier.padding(bottom = 4.dp).size(40.dp),
                 ) {
-                    Icon(
-                        Icons.Default.Add, "Прикрепить фото или видео",
-                        tint = if (vm.canAttach) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                    )
+                    Icon(Icons.Default.Add, "Прикрепить фото или видео", tint = MaterialTheme.colorScheme.primary)
                 }
+                // 🎨 — следующее сообщение рисует модель картинок
+                Box(
+                    Modifier.padding(bottom = 8.dp).size(36.dp).clip(RoundedCornerShape(18.dp))
+                        .background(if (vm.drawMode) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
+                        .clickable(enabled = enabled && !generating) { vm.drawMode = !vm.drawMode },
+                    contentAlignment = Alignment.Center,
+                ) { Text("🎨", style = MaterialTheme.typography.titleMedium) }
                 OutlinedTextField(
                     value = text,
                     onValueChange = { text = it },
                     modifier = Modifier.weight(1f),
-                    placeholder = { Text(if (enabled) "Сообщение" else "Модель не загружена") },
+                    placeholder = {
+                        Text(
+                            when {
+                                !enabled -> "Модель не загружена"
+                                vm.drawMode && vm.pendingAttachments.isNotEmpty() -> "Что изменить на фото?"
+                                vm.drawMode -> "Что нарисовать?"
+                                else -> "Сообщение"
+                            }
+                        )
+                    },
                     enabled = enabled,
                     maxLines = 6,
                     shape = RoundedCornerShape(20.dp),

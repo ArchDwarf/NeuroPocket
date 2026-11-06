@@ -88,7 +88,7 @@ private fun App(vm: MainViewModel) {
     ) { padding ->
         val mod = Modifier.padding(padding).consumeWindowInsets(padding)
         when (tab) {
-            0 -> ChatScreen(vm, mod, onOpenModels = { vm.switchKind(ModelKind.CHAT); tab = 2 })
+            0 -> ChatScreen(vm, mod, onOpenModels = { kind -> vm.speechTab = false; vm.switchKind(kind); tab = 2 })
             1 -> ImageScreen(vm, mod, onOpenModels = { vm.switchKind(ModelKind.IMAGE); tab = 2 })
             2 -> ModelsScreen(vm, mod)
             else -> SettingsScreen(vm, mod)

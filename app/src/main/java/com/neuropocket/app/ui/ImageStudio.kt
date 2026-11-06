@@ -110,22 +110,84 @@ class ImageStudio(
     }
 
     private fun load(path: String) {
+        scope.launch { loadNow(path) }
+    }
+
+    private suspend fun loadNow(path: String) {
         val name = File(path).name
-        scope.launch {
-            cancel()
-            job?.join()
-            beforeLoad()
-            state = SdState.Loading(name)
-            state = try {
-                val s = settings()
-                val arch = engine.load(path, s.threads, s.imageWeightType)
-                applyDefaults(arch, name)
-                SdState.Ready(name, arch)
-            } catch (e: Throwable) {
-                SdState.Error(name, e.message ?: e.toString())
-            }
+        cancel()
+        job?.join()
+        beforeLoad()
+        state = SdState.Loading(name)
+        state = try {
+            val s = settings()
+            val arch = engine.load(path, s.threads, s.imageWeightType)
+            applyDefaults(arch, name)
+            SdState.Ready(name, arch)
+        } catch (e: Throwable) {
+            SdState.Error(name, e.message ?: e.toString())
         }
     }
+
+    /**
+     * Готовит модель для рисования из чата: загружает последнюю выбранную
+     * (или первую установленную) и ждёт окончания загрузки.
+     * Возвращает текст ошибки или null, если всё готово.
+     */
+    suspend fun awaitReady(installed: List<LocalModel>): String? {
+        if (state is SdState.Ready && engine.isLoaded) return null
+        while (state is SdState.Loading) kotlinx.coroutines.delay(200)
+        if (state is SdState.Ready && engine.isLoaded) return null
+        val path = settings().imageModelPath.takeIf { p -> p.isNotBlank() && File(p).exists() }
+            ?: installed.firstOrNull()?.path?.also { saveSettings(settings().copy(imageModelPath = it)) }
+            ?: return "Не установлена модель для картинок"
+        loadNow(path)
+        return (state as? SdState.Error)?.message
+    }
+
+    /**
+     * Рисует для чата: по описанию или (если есть [source]) изменяет фото.
+     * Не трогает настройки вкладки «Картинки», кроме общих параметров модели.
+     */
+    suspend fun generateForChat(prompt: String, source: Bitmap?, onProgress: (Int, Int) -> Unit): GenResult? {
+        if (generating) return null
+        generating = true
+        val started = System.currentTimeMillis()
+        try {
+            val chatMode = when {
+                source == null -> SdMode.TEXT
+                isEditModel -> SdMode.INSTRUCT
+                else -> SdMode.REDRAW
+            }
+            val req = withContext(Dispatchers.Default) {
+                val seed = Random.nextLong(0, Int.MAX_VALUE.toLong())
+                if (source != null) {
+                    val fitted = Media.fitForDiffusion(source, side)
+                    SdRequest(
+                        prompt = prompt, negative = if (cfg > 1f) negative else "",
+                        width = fitted.width, height = fitted.height, steps = steps, cfg = cfg, seed = seed,
+                        sampler = sampler, mode = chatMode, strength = 0.6f, imageCfg = imageCfg,
+                        image = Media.toRgb(fitted),
+                    )
+                } else {
+                    SdRequest(
+                        prompt = prompt, negative = if (cfg > 1f) negative else "",
+                        width = side, height = side, steps = steps, cfg = cfg, seed = seed, sampler = sampler,
+                    )
+                }
+            }
+            val img = engine.generate(req, SdProgress { st, total, _ -> onProgress(st, total) }) ?: return null
+            val bmp = withContext(Dispatchers.Default) { Media.fromRgb(img.rgb, img.width, img.height) }
+            val r = GenResult(bmp, prompt, req.seed, (System.currentTimeMillis() - started) / 1000f)
+            results.add(0, r)
+            if (results.size > 12) results.removeAt(results.lastIndex)
+            return r
+        } finally {
+            generating = false
+        }
+    }
+
+    val modelArch: String get() = (state as? SdState.Ready)?.arch ?: ""
 
     /** Подбирает настройки под тип модели. */
     private fun applyDefaults(arch: String, fileName: String) {

@@ -41,6 +41,9 @@ import java.util.concurrent.atomic.AtomicLong
 
 enum class Role { USER, ASSISTANT }
 
+/** Кнопка-подсказка под сообщением. */
+enum class ChatAction { VISION_MODELS, IMAGE_MODELS }
+
 data class ChatMessage(
     val id: Long,
     val role: Role,
@@ -48,6 +51,10 @@ data class ChatMessage(
     val attachments: List<Attachment> = emptyList(),
     val stats: String? = null,
     val isError: Boolean = false,
+    /** Картинка, нарисованная в чате. */
+    val image: android.graphics.Bitmap? = null,
+    /** Служебная подсказка (не попадает в контекст модели). */
+    val action: ChatAction? = null,
 )
 
 sealed interface ModelState {
@@ -242,35 +249,49 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun loadModel(path: String) {
-        val name = File(path).name
-        val mmproj = File(path + ModelRepository.MMPROJ_SUFFIX).takeIf { it.exists() }?.absolutePath
         viewModelScope.launch {
             stopGeneration()
             genJob?.join()
-            if (lowMemory && studio.isModelLoaded) {
-                studio.unload()
-                toast("Модель картинок выгружена, чтобы хватило памяти")
-            }
-            modelState = ModelState.Loading(name)
-            modelState = try {
-                val loaded = engine.load(path, mmproj, settings.contextSize, settings.threads)
-                contextStart = 0
-                if (mmproj != null && !loaded.hasVision) toast("Не удалось загрузить модуль зрения — модель работает только с текстом")
-                ModelState.Ready(name, loaded.info, loaded.hasVision)
-            } catch (e: Throwable) {
-                ModelState.Error(name, e.message ?: e.toString())
-            }
+            loadModelNow(path)
         }
+    }
+
+    private suspend fun loadModelNow(path: String) {
+        val name = File(path).name
+        val mmproj = File(path + ModelRepository.MMPROJ_SUFFIX).takeIf { it.exists() }?.absolutePath
+        if (lowMemory && studio.isModelLoaded && !studio.generating) {
+            studio.unload()
+        }
+        modelState = ModelState.Loading(name)
+        modelState = try {
+            val loaded = engine.load(path, mmproj, settings.contextSize, settings.threads)
+            contextStart = 0
+            if (mmproj != null && !loaded.hasVision) toast("Не удалось загрузить модуль зрения — модель работает только с текстом")
+            ModelState.Ready(name, loaded.info, loaded.hasVision)
+        } catch (e: Throwable) {
+            ModelState.Error(name, e.message ?: e.toString())
+        }
+    }
+
+    /** Загружает выбранную чат-модель, если она выгружена (например, ради модели картинок). */
+    private suspend fun ensureChatReady(): Boolean {
+        while (modelState is ModelState.Loading) delay(200)
+        if (modelState is ModelState.Ready && engine.isLoaded) return true
+        val path = settings.activeModelPath.takeIf { it.isNotBlank() && File(it).exists() } ?: return false
+        loadModelNow(path)
+        return modelState is ModelState.Ready
     }
 
     /** Освобождает память под модель картинок на слабых телефонах. */
     private suspend fun freeChatIfLowMemory() {
         if (lowMemory && engine.isLoaded) {
-            stopGeneration()
-            genJob?.join()
+            // Генерацию из чата не ждём: она сама вызывает загрузку модели картинок
+            if (!drawing) {
+                stopGeneration()
+                genJob?.join()
+            }
             engine.unload()
             modelState = ModelState.None
-            toast("Чат-модель выгружена, чтобы хватило памяти для картинок")
         }
     }
 
@@ -344,11 +365,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     val canAttach: Boolean get() = (modelState as? ModelState.Ready)?.hasVision == true
 
+    /** Можно ли писать в чат: есть чат-модель (загруженная или выбранная) или модель картинок. */
+    val inputEnabled: Boolean get() = modelState !is ModelState.Loading &&
+        (modelState is ModelState.Ready || settings.activeModelPath.isNotBlank() || installedImage.isNotEmpty())
+
+    /** Режим «нарисовать»: следующее сообщение — запрос для модели картинок. */
+    var drawMode by mutableStateOf(false)
+    private var drawing = false
+
     fun attach(uris: List<Uri>) {
-        if (!canAttach) {
-            toast("Эта модель не видит изображения. Выберите модель со значком 👁")
-            return
-        }
+        if (uris.isEmpty()) return
         attachLoading = true
         viewModelScope.launch {
             for (uri in uris) {
@@ -368,27 +394,144 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         pendingAttachments.remove(a)
     }
 
+    fun attachBitmap(bmp: android.graphics.Bitmap) {
+        pendingAttachments += Media.attachmentFromBitmap(bmp, settings.visionMaxSide)
+    }
+
     fun send(text: String) {
         val trimmed = text.trim()
         if ((trimmed.isEmpty() && pendingAttachments.isEmpty()) || isGenerating) return
-        if (modelState !is ModelState.Ready) {
-            toast("Сначала выберите и загрузите модель во вкладке «Модели»")
+        val atts = pendingAttachments.toList()
+        val draw = drawMode || ChatIntent.isDrawRequest(trimmed, atts.isNotEmpty())
+        if (!draw && modelState !is ModelState.Ready && settings.activeModelPath.isBlank()) {
+            toast("Сначала выберите чат-модель во вкладке «Модели»")
             return
         }
         val prompt = trimmed.ifEmpty {
-            if (pendingAttachments.any { it.kind == AttachmentKind.VIDEO }) "Опиши, что происходит на видео."
+            if (atts.any { it.kind == AttachmentKind.VIDEO }) "Опиши, что происходит на видео."
             else "Опиши, что на изображении."
         }
-        messages += ChatMessage(ids.incrementAndGet(), Role.USER, prompt, pendingAttachments.toList())
+        messages += ChatMessage(ids.incrementAndGet(), Role.USER, prompt, atts)
         pendingAttachments.clear()
-        generate()
+        drawMode = false
+        if (draw) drawInChat(prompt, atts) else answer(atts)
+    }
+
+    /** Ответ чат-модели (с её загрузкой, если она выгружена). */
+    private fun answer(atts: List<Attachment>) {
+        isGenerating = true
+        viewModelScope.launch {
+            if (!ensureChatReady()) {
+                isGenerating = false
+                messages += ChatMessage(
+                    ids.incrementAndGet(), Role.ASSISTANT,
+                    "Чат-модель не загружена. Выберите её во вкладке «Модели».", isError = true,
+                )
+                return@launch
+            }
+            val ready = modelState as ModelState.Ready
+            if (atts.isNotEmpty() && !ready.hasVision) {
+                isGenerating = false
+                messages += ChatMessage(
+                    ids.incrementAndGet(), Role.ASSISTANT,
+                    "Модель «${ready.name}» понимает только текст и не видит фото.\n\n" +
+                        "• Чтобы описать фото или ответить на вопрос о нём, выберите модель со значком 👁 " +
+                        "(например SmolVLM2 или Gemma 4) — модуль зрения скачается вместе с ней.\n" +
+                        "• Чтобы изменить фото, напишите, что сделать: «перерисуй в стиле аниме», " +
+                        "«сделай зимним» — или включите 🎨 перед отправкой.",
+                    action = ChatAction.VISION_MODELS,
+                )
+                return@launch
+            }
+            generate()
+        }
     }
 
     /** Перегенерировать последний ответ. */
     fun regenerate() {
-        if (isGenerating || modelState !is ModelState.Ready) return
+        if (isGenerating) return
         if (messages.lastOrNull()?.role == Role.ASSISTANT) messages.removeAt(messages.lastIndex)
-        if (messages.lastOrNull()?.role == Role.USER) generate()
+        val last = messages.lastOrNull() ?: return
+        if (last.role != Role.USER) return
+        if (ChatIntent.isDrawRequest(last.text, last.attachments.isNotEmpty())) drawInChat(last.text, last.attachments)
+        else answer(emptyList())
+    }
+
+    // ===================== Рисование в чате =====================
+
+    private fun drawInChat(request: String, atts: List<Attachment>) {
+        val replyId = ids.incrementAndGet()
+        val frame = atts.firstOrNull()?.frames?.firstOrNull()
+        val source = frame?.let { Media.fromRgb(it.rgb, it.width, it.height) }
+        if (installedImage.isEmpty()) {
+            messages += ChatMessage(
+                replyId, Role.ASSISTANT,
+                "Чтобы рисовать" + (if (source != null) " и изменять фото" else "") +
+                    ", нужна модель для картинок. Скачайте, например, SDXS (рисует за секунды) или " +
+                    "Stable Diffusion 1.5 — и повторите запрос.",
+                action = ChatAction.IMAGE_MODELS,
+            )
+            return
+        }
+        messages += ChatMessage(replyId, Role.ASSISTANT, if (source == null) "🎨 Рисую…" else "🎨 Изменяю фото…", stats = "подготовка")
+        isGenerating = true
+        drawing = true
+        genJob = viewModelScope.launch {
+            try {
+                update(replyId) { it.copy(stats = "перевожу описание для модели картинок") }
+                val en = toEnglishPrompt(request, edit = source != null)
+                update(replyId) { it.copy(stats = "загрузка модели картинок") }
+                studio.awaitReady(installedImage)?.let { err ->
+                    update(replyId) { it.copy(text = "Не удалось загрузить модель картинок: $err", isError = true, stats = null) }
+                    return@launch
+                }
+                val r = studio.generateForChat(en, source) { st, total ->
+                    update(replyId) { it.copy(stats = "шаг $st из $total") }
+                }
+                if (r == null) {
+                    update(replyId) { it.copy(text = "Рисование остановлено.", stats = null) }
+                } else {
+                    update(replyId) {
+                        it.copy(
+                            text = (if (source == null) "Готово!" else "Готово — вот изменённое фото.") +
+                                " Описание для модели: «$en»",
+                            image = r.bitmap,
+                            stats = String.format(java.util.Locale.US, "%s · %.1f с", studio.modelArch, r.seconds),
+                        )
+                    }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                update(replyId) { it.copy(text = "Не удалось нарисовать: ${e.message}", isError = true, stats = null) }
+            } finally {
+                drawing = false
+                isGenerating = false
+            }
+        }
+    }
+
+    /** Переводит запрос в английское описание для модели картинок (с помощью чат-модели). */
+    private suspend fun toEnglishPrompt(request: String, edit: Boolean): String {
+        val stripped = ChatIntent.stripCommand(request)
+        if (!ChatIntent.needsTranslation(stripped)) return stripped
+        if (!ensureChatReady()) return stripped
+        val name = (modelState as? ModelState.Ready)?.name?.lowercase() ?: ""
+        val system = if (edit) {
+            "You turn a user's photo editing request into a short English instruction for an image editing model. " +
+                "Reply with the instruction only: one line, no quotes, no explanations."
+        } else {
+            "You turn a user's request into a prompt for the Stable Diffusion image generator. Reply with one line only: " +
+                "a concise English prompt of comma-separated descriptive phrases (subject, details, style, lighting). " +
+                "No explanations, no quotes."
+        }
+        val user = stripped + if ("qwen3" in name) " /no_think" else ""
+        val sb = StringBuilder()
+        engine.generate(
+            listOf(ChatTurn("system", system), ChatTurn("user", user)),
+            SamplingParams(temperature = 0.3f, topP = 0.9f, topK = 40, repeatPenalty = 1.05f, maxTokens = 200),
+        ).collect { ev -> if (ev is GenEvent.Text) sb.append(ev.text) }
+        return ChatIntent.cleanPrompt(sb.toString()) ?: stripped
     }
 
     /** Превращает сообщение пользователя с вложениями в реплику для модели. */
@@ -433,7 +576,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 while (true) {
                     val history = messages
                         .drop(contextStart)
-                        .filter { it.id != replyId && !it.isError }
+                        .filter { it.id != replyId && !it.isError && it.action == null }
                         .map { toTurn(it, vision) }
                     val turns = buildList {
                         if (s.systemPrompt.isNotBlank()) add(ChatTurn("system", s.systemPrompt))
@@ -502,7 +645,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun stopGeneration() {
-        if (isGenerating) engine.stop()
+        if (isGenerating) {
+            engine.stop()
+            studio.cancel()
+        }
     }
 
     fun clearChat() {

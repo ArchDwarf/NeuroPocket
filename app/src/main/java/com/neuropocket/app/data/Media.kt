@@ -114,6 +114,17 @@ object Media {
             )
         }
 
+    /** Вложение из готовой картинки (например, нарисованной в чате). */
+    fun attachmentFromBitmap(bmp: Bitmap, maxSide: Int): Attachment {
+        val img = scaleToMax(bmp, maxSide)
+        return Attachment(
+            id = UUID.randomUUID().toString(),
+            kind = AttachmentKind.IMAGE,
+            thumbnail = scaleToMax(img, 256),
+            frames = listOf(Frame(toRgb(img), img.width, img.height)),
+        )
+    }
+
     private fun timeLabel(sec: Float): String {
         val t = sec.roundToInt()
         return String.format(Locale.US, "%02d:%02d", t / 60, t % 60)
