@@ -156,10 +156,13 @@ class ImageController(private val app: AppState, val video: Boolean) {
     suspend fun awaitReady(): String? {
         while (state is SdLoadState.Loading) delay(200)
         if (state is SdLoadState.Ready && engine.isLoaded) return null
-        val name = app.settings.imageProfile
+        val name = if (video) app.settings.videoProfile else app.settings.imageProfile
+        val what = if (video) "видео" else "картинок"
         val p = profiles.find { it.name == name && filesPresent(it) } ?: profiles.firstOrNull { filesPresent(it) }
-            ?: return if (profiles.isEmpty()) "Нет модели для картинок" else "Файлы модели картинок ещё не скачаны"
-        if (p.name != name) app.updateSettings(app.settings.copy(imageProfile = p.name))
+            ?: return if (profiles.isEmpty()) "Нет модели для $what" else "Файлы модели $what ещё не скачаны"
+        if (p.name != name) app.updateSettings(
+            if (video) app.settings.copy(videoProfile = p.name) else app.settings.copy(imageProfile = p.name),
+        )
         loadNow(p)
         return (state as? SdLoadState.Error)?.message
     }
@@ -204,6 +207,19 @@ class ImageController(private val app: AppState, val video: Boolean) {
             if (results.size > 30) results.removeAt(results.lastIndex)
             current = r
             return r
+        } finally {
+            running = false
+        }
+    }
+
+    /** Создаёт видео по описанию или «оживляет» фото [src] — для чата. */
+    suspend fun generateVideoForChat(prompt: String, src: BufferedImage?, onProgress: (Int, Int) -> Unit): VideoResult? {
+        if (running) return null
+        running = true
+        val started = System.currentTimeMillis()
+        try {
+            val seed = Random.nextLong(0, Int.MAX_VALUE.toLong())
+            return renderVideo(prompt, src, seed, started, SdProgress { st, total, _ -> onProgress(st, total) })
         } finally {
             running = false
         }
@@ -373,37 +389,48 @@ class ImageController(private val app: AppState, val video: Boolean) {
     }
 
     private suspend fun runVideo(seed: Long, started: Long) {
-        val src = source
+        val r = renderVideo(prompt.trim(), source, seed, started, progress)
+        if (r == null) {
+            app.toast("Генерация видео остановлена или не удалась")
+            return
+        }
+        videoResult = r
+        app.toast("Видео сохранено: ${r.file.name}")
+    }
+
+    private suspend fun renderVideo(text: String, src: BufferedImage?, seed: Long, started: Long, pr: SdProgress): VideoResult? {
         val req = withContext(Dispatchers.Default) {
             var image: ByteArray? = null
             var iw = 0
             var ih = 0
+            var w = width / 16 * 16
+            var h = height / 16 * 16
             if (src != null) {
-                val fitted = DesktopMedia.resize(src, width, height)
+                // Сохраняем пропорции фото: подгоняем под площадь кадра модели
+                val area = (w * h).toDouble()
+                val k = kotlin.math.sqrt(area / (src.width.toDouble() * src.height))
+                w = maxOf(16, (src.width * k).toInt() / 16 * 16)
+                h = maxOf(16, (src.height * k).toInt() / 16 * 16)
+                val fitted = DesktopMedia.resize(src, w, h)
                 image = DesktopMedia.toRgb(fitted)
                 iw = fitted.width
                 ih = fitted.height
             }
             SdVideoRequest(
-                prompt = prompt.trim(), negative = negative.trim(), width = width / 16 * 16, height = height / 16 * 16,
+                prompt = text, negative = negative.trim(), width = w, height = h,
                 frames = frames, fps = fps, steps = steps, cfg = cfg, seed = seed, sampler = sampler,
                 flowShift = flowShift, highNoiseSteps = highNoiseSteps, highNoiseCfg = cfg,
                 vaeTiling = app.settings.sdVaeTiling, image = image, imageWidth = iw, imageHeight = ih,
             )
         }
-        val v = engine.generateVideo(req, progress)
-        if (v == null) {
-            app.toast("Генерация видео остановлена или не удалась")
-            return
-        }
+        val v = engine.generateVideo(req, pr) ?: return null
         phase = "Сохранение MP4"
         val file = File(Paths.outputs, "videos/${stamp()}_$seed.mp4")
         DesktopMedia.encodeMp4(v.frames, v.width, v.height, v.fps, file)
         val bitmaps = withContext(Dispatchers.Default) {
             v.frames.map { DesktopMedia.fromRgb(it, v.width, v.height).toComposeImageBitmap() }
         }
-        videoResult = VideoResult(bitmaps, v.fps, file, (System.currentTimeMillis() - started) / 1000f)
-        app.toast("Видео сохранено: ${file.name}")
+        return VideoResult(bitmaps, v.fps, file, (System.currentTimeMillis() - started) / 1000f)
     }
 
     fun cancel() {

@@ -43,6 +43,7 @@ dependencies {
     implementation("androidx.annotation:annotation-jvm:1.9.1")
     implementation("org.json:json:20240303")
     implementation("org.apache.commons:commons-compress:1.27.1")
+    implementation("org.apache.pdfbox:pdfbox:3.0.3")
     implementation("org.jcodec:jcodec:0.2.5")
     implementation("org.jcodec:jcodec-javase:0.2.5")
     implementation(files(sherpaJar))

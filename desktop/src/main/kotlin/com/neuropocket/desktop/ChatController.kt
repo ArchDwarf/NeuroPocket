@@ -11,6 +11,7 @@ import com.neuropocket.app.engine.ChatTurn
 import com.neuropocket.app.engine.GenEvent
 import com.neuropocket.app.engine.LlamaEngine
 import com.neuropocket.app.engine.LlamaNative
+import com.neuropocket.app.engine.Markdown
 import com.neuropocket.app.engine.SamplingParams
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -22,7 +23,7 @@ import java.util.concurrent.atomic.AtomicLong
 enum class Role { USER, ASSISTANT }
 
 /** Кнопка-подсказка под сообщением. */
-enum class MsgAction { VISION_MODELS, IMAGE_MODELS }
+enum class MsgAction { VISION_MODELS, IMAGE_MODELS, VIDEO_MODELS, SPEECH_MODELS }
 
 data class Msg(
     val id: Long,
@@ -33,6 +34,8 @@ data class Msg(
     val isError: Boolean = false,
     /** Картинка, нарисованная в чате. */
     val image: ImageResult? = null,
+    /** Видео, созданное в чате. */
+    val video: VideoResult? = null,
     /** Служебная подсказка — не попадает в контекст модели. */
     val action: MsgAction? = null,
 )
@@ -102,20 +105,50 @@ class ChatController(private val app: AppState) {
 
     fun attachFromDialog() {
         val files = DesktopMedia.chooseFiles(
-            "Фото или видео", DesktopMedia.IMAGE_EXT + DesktopMedia.VIDEO_EXT, "Изображения и видео",
+            "Фото, видео, файлы, документы, аудио",
+            DesktopMedia.IMAGE_EXT + DesktopMedia.VIDEO_EXT + DesktopMedia.TEXT_EXT + DesktopMedia.DOC_EXT + DesktopMedia.AUDIO_EXT,
+            "Всё поддерживаемое",
         )
+        attachFiles(files)
+    }
+
+    /** Прикрепить файлы (из диалога или перетаскиванием). */
+    fun attachFiles(files: List<File>) {
         if (files.isEmpty()) return
         attachLoading = true
         app.scope.launch {
             for (f in files) {
                 try {
-                    pending += DesktopMedia.loadAttachment(f, app.settings.visionMaxSide, app.settings.videoFrames)
-                } catch (e: Exception) {
+                    var a = DesktopMedia.loadAttachment(f, app.settings.visionMaxSide, app.settings.videoFrames)
+                    if (a.kind == DAttachmentKind.AUDIO) a = transcribeAttachment(a) ?: continue
+                    pending += a
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
                     app.toast("${f.name}: ${e.message}")
                 }
             }
             attachLoading = false
         }
+    }
+
+    private suspend fun transcribeAttachment(a: DAttachment): DAttachment? {
+        val (samples, rate) = a.audio ?: return a
+        val text = app.speech.transcribe(samples, rate)
+        if (text == null) {
+            messages += Msg(
+                ids.incrementAndGet(), Role.ASSISTANT,
+                "Чтобы понимать голосовые записи, установите модель распознавания речи во вкладке «Речь» " +
+                    "(например Whisper или Vosk для русского) — запись расшифруется прямо на компьютере.",
+                action = MsgAction.SPEECH_MODELS,
+            )
+            return null
+        }
+        if (text.isBlank()) {
+            app.toast("${a.name}: речь не распознана")
+            return null
+        }
+        return DAttachment(a.id, a.kind, a.name, a.thumbnail, emptyList(), a.durationSec, text = text.trim())
     }
 
     // ===================== Сообщения =====================
@@ -131,27 +164,35 @@ class ChatController(private val app: AppState) {
     }
 
     val inputEnabled: Boolean get() = state !is LoadState.Loading &&
-        (state is LoadState.Ready || app.profiles.any { !it.video })
+        (state is LoadState.Ready || app.profiles.isNotEmpty())
 
     fun send() {
         val text = input.trim()
         if ((text.isEmpty() && pending.isEmpty()) || generating) return
         val atts = pending.toList()
-        val draw = drawMode || ChatIntent.isDrawRequest(text, atts.isNotEmpty())
-        if (!draw && state !is LoadState.Ready) {
+        val visual = atts.filter { it.kind == DAttachmentKind.IMAGE || it.kind == DAttachmentKind.VIDEO }
+        val makeVideo = !drawMode && ChatIntent.isVideoRequest(text)
+        val draw = !makeVideo && (drawMode || ChatIntent.isDrawRequest(text, visual.isNotEmpty()))
+        if (!draw && !makeVideo && state !is LoadState.Ready) {
             app.toast("Сначала выберите чат-модель вверху или во вкладке «Модели»")
             return
         }
         val prompt = text.ifEmpty {
-            if (atts.any { it.kind == DAttachmentKind.VIDEO }) "Опиши, что происходит на видео." else "Опиши, что на изображении."
+            when {
+                atts.any { it.kind == DAttachmentKind.VIDEO } -> "Опиши, что происходит на видео."
+                atts.any { it.kind == DAttachmentKind.IMAGE } -> "Опиши, что на изображении."
+                atts.any { it.kind == DAttachmentKind.FILE } -> "Разбери этот файл: кратко опиши, что в нём, и укажи проблемы, если они есть."
+                else -> "Ответь на голосовое сообщение."
+            }
         }
         messages += Msg(ids.incrementAndGet(), Role.USER, prompt, atts)
         pending.clear()
         input = ""
         drawMode = false
         when {
-            draw -> drawInChat(prompt, atts)
-            atts.isNotEmpty() && !vision -> messages += Msg(
+            makeVideo -> videoInChat(prompt, visual)
+            draw -> drawInChat(prompt, visual)
+            visual.isNotEmpty() && !vision -> messages += Msg(
                 ids.incrementAndGet(), Role.ASSISTANT,
                 "Модель «${(state as? LoadState.Ready)?.name ?: ""}» понимает только текст и не видит фото.\n\n" +
                     "• Чтобы описать фото или ответить на вопрос о нём, выберите модель со значком 👁 " +
@@ -169,7 +210,9 @@ class ChatController(private val app: AppState) {
         if (messages.lastOrNull()?.role == Role.ASSISTANT) messages.removeAt(messages.lastIndex)
         val last = messages.lastOrNull() ?: return
         if (last.role != Role.USER) return
-        if (ChatIntent.isDrawRequest(last.text, last.attachments.isNotEmpty())) drawInChat(last.text, last.attachments)
+        val visual = last.attachments.filter { it.kind == DAttachmentKind.IMAGE || it.kind == DAttachmentKind.VIDEO }
+        if (ChatIntent.isVideoRequest(last.text)) videoInChat(last.text, visual)
+        else if (ChatIntent.isDrawRequest(last.text, visual.isNotEmpty())) drawInChat(last.text, visual)
         else if (state is LoadState.Ready) generate()
     }
 
@@ -222,12 +265,75 @@ class ChatController(private val app: AppState) {
         }
     }
 
-    /** Переводит запрос на английский для модели картинок (если загружена чат-модель). */
-    private suspend fun toEnglishPrompt(request: String, edit: Boolean): String {
-        val stripped = ChatIntent.stripCommand(request)
-        if (!ChatIntent.needsTranslation(stripped) || state !is LoadState.Ready) return stripped
+    // ===================== Видео в чате =====================
+
+    private fun videoInChat(request: String, atts: List<DAttachment>) {
+        val replyId = ids.incrementAndGet()
+        val src = atts.firstOrNull()?.frames?.firstOrNull()?.let { DesktopMedia.fromRgb(it.rgb, it.width, it.height) }
+        if (app.video.profiles.isEmpty()) {
+            messages += Msg(
+                replyId, Role.ASSISTANT,
+                "Чтобы создавать видео" + (if (src != null) " и оживлять фото" else "") + ", нужна видеомодель. " +
+                    "Скачайте набор Wan во вкладке «Модели» → «Картинки и видео» (Wan 2.1 1.3B — для начала, " +
+                    "Wan 2.2 TI2V 5B — лучше качество и умеет оживлять фото). Видео считается долго: минуты даже на хорошей видеокарте.",
+                action = MsgAction.VIDEO_MODELS,
+            )
+            return
+        }
+        messages += Msg(replyId, Role.ASSISTANT, if (src == null) "🎬 Создаю видео…" else "🎬 Оживляю фото…", stats = "подготовка")
+        generating = true
+        job = app.scope.launch {
+            try {
+                update(replyId) { it.copy(stats = "готовлю описание для видеомодели") }
+                val en = toEnglishPrompt(request, edit = false, video = true, hasSource = src != null)
+                update(replyId) { it.copy(stats = "загрузка видеомодели") }
+                app.video.awaitReady()?.let { err ->
+                    update(replyId) { it.copy(text = "Не удалось загрузить видеомодель: $err", isError = true, stats = null) }
+                    return@launch
+                }
+                val started = System.currentTimeMillis()
+                val r = app.video.generateVideoForChat(en, src) { st, total ->
+                    val sec = (System.currentTimeMillis() - started) / 1000
+                    val eta = if (st > 0) " · осталось ≈${(sec * (total - st) / st).coerceAtLeast(0)} с" else ""
+                    update(replyId) { it.copy(stats = "шаг $st из $total$eta") }
+                }
+                if (r == null) {
+                    update(replyId) { it.copy(text = "Создание видео остановлено.", stats = null) }
+                } else {
+                    update(replyId) {
+                        it.copy(
+                            text = "Готово! Описание для модели: «$en»",
+                            video = r,
+                            stats = String.format(Locale.US, "%s · %d кадров · %.0f с", app.video.archName, r.frames.size, r.seconds),
+                        )
+                    }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                update(replyId) { it.copy(text = "Не удалось создать видео: ${e.message}", isError = true, stats = null) }
+            } finally {
+                generating = false
+            }
+        }
+    }
+
+    /** Переводит запрос на английский для модели картинок/видео (если загружена чат-модель). */
+    private suspend fun toEnglishPrompt(request: String, edit: Boolean, video: Boolean = false, hasSource: Boolean = false): String {
+        val stripped = if (video) ChatIntent.stripVideoCommand(request) else ChatIntent.stripCommand(request)
+        val motion = "natural smooth motion, subtle camera movement, cinematic, high quality"
+        if (state !is LoadState.Ready) {
+            return if (video && hasSource && ChatIntent.needsTranslation(stripped)) motion else stripped
+        }
+        if (!video && !ChatIntent.needsTranslation(stripped)) return stripped
         val name = (state as LoadState.Ready).name.lowercase()
-        val system = if (edit) {
+        val system = if (video) {
+            "You turn a user's request into a prompt for a text-to-video model. Reply with one line only: " +
+                "a concise English description of the scene and the motion (subject, action, camera movement, style). " +
+                (if (hasSource) "The video starts from the user's photo; if the request only asks to animate it, " +
+                    "describe natural, subtle motion of what is likely in a photo. " else "") +
+                "No explanations, no quotes."
+        } else if (edit) {
             "You turn a user's photo editing request into a short English instruction for an image editing model. " +
                 "Reply with the instruction only: one line, no quotes, no explanations."
         } else {
@@ -245,7 +351,11 @@ class ChatController(private val app: AppState) {
 
     private fun toTurn(m: Msg): ChatTurn {
         if (m.role == Role.ASSISTANT) return ChatTurn("assistant", m.text)
-        if (m.attachments.isEmpty() || !vision) return ChatTurn("user", m.text)
+        if (m.attachments.isEmpty()) return ChatTurn("user", m.text)
+        if (!vision) {
+            val texts = m.attachments.filter { it.kind == DAttachmentKind.FILE || it.kind == DAttachmentKind.AUDIO }
+            return ChatTurn("user", texts.joinToString("") { textPart(it) } + m.text)
+        }
         val marker = engine.marker
         val images = mutableListOf<ChatImage>()
         val sb = StringBuilder()
@@ -263,10 +373,18 @@ class ChatController(private val app: AppState) {
                         sb.append('[').append(f.label).append("] ").append(marker).append('\n')
                     }
                 }
+                DAttachmentKind.FILE, DAttachmentKind.AUDIO -> sb.append(textPart(a))
             }
         }
         sb.append(m.text)
         return ChatTurn("user", sb.toString(), images)
+    }
+
+    private fun textPart(a: DAttachment): String = if (a.kind == DAttachmentKind.AUDIO) {
+        "Голосовое сообщение «${a.name}» (расшифровка): ${a.text}\n\n"
+    } else {
+        val lang = Markdown.languageFor(a.name.substringAfterLast('.', ""))
+        "Файл «${a.name}»:\n```$lang\n${a.text}\n```\n\n"
     }
 
     private fun generate() {
@@ -281,7 +399,8 @@ class ChatController(private val app: AppState) {
             try {
                 while (true) {
                     val turns = buildList {
-                        if (s.systemPrompt.isNotBlank()) add(ChatTurn("system", s.systemPrompt))
+                        val sys = ChatPresets.systemPrompt(s)
+                        if (sys.isNotBlank()) add(ChatTurn("system", sys))
                         messages.drop(contextStart).filter { it.id != replyId && !it.isError && it.action == null }.forEach { add(toTurn(it)) }
                     }
                     var done: GenEvent.Done? = null
@@ -339,6 +458,7 @@ class ChatController(private val app: AppState) {
         if (generating) {
             engine.stop()
             app.images.cancel()
+            app.video.cancel()
         }
     }
 

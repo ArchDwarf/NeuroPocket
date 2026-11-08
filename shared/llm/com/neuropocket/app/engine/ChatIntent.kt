@@ -30,6 +30,26 @@ object ChatIntent {
             "переведи|прочитай|распознай|describe|what|who|why|how\\s+many|explain|read)\\b)",
     )
 
+    // «Сделай видео/ролик…», «оживи фото», «анимируй»
+    private val videoRequest = Regex(
+        "(?iU)(\\b(сделай|сделайте|создай|создайте|сгенерируй|сгенерируйте|сними|нарисуй|покажи|хочу|нужно|нужен|" +
+            "generate|create|make|render|show)\\b.{0,40}?\\b(видео\\w*|ролик\\w*|клип\\w*|анимаци\\w*|мультик\\w*|" +
+            "video\\w*|clip\\w*|animation\\w*)\\b)|^\\s*(пожалуйста[,\\s]+)?(оживи|анимируй|animate)\\b",
+    )
+
+    /** Просьба создать видео (по описанию или из прикреплённого фото). */
+    fun isVideoRequest(text: String): Boolean =
+        text.isNotBlank() && videoRequest.containsMatchIn(text) && !question.containsMatchIn(text)
+
+    private val videoPrefix = Regex(
+        "(?iU)^\\s*(пожалуйста[,\\s]+)?((сделай|создай|сгенерируй|сними|generate|create|make)(\\s+(мне|me))?\\s+" +
+            "(видео|ролик|клип|анимацию|мультик|an?\\s+video|video|clip|animation)|оживи(\\s+(фото|картинку|изображение))?|" +
+            "анимируй(\\s+(фото|картинку|изображение))?|animate(\\s+(this|the)\\s+(photo|image|picture))?)[\\s,:.-]*",
+    )
+
+    /** Убирает «сделай видео …», оставляя описание сцены. */
+    fun stripVideoCommand(text: String): String = text.replace(videoPrefix, "").trim().ifEmpty { text.trim() }
+
     fun isDrawRequest(text: String, hasPhoto: Boolean): Boolean {
         if (text.isBlank()) return false
         if (drawVerb.containsMatchIn(text) || makeImage.containsMatchIn(text)) return true

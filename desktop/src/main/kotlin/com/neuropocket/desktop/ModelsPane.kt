@@ -63,6 +63,9 @@ private val SUGGESTED_DESKTOP = listOf(
     Suggested("unsloth/Mistral-Small-3.2-24B-Instruct-2506-GGUF", "👁 Mistral Small 3.2 · 24B", "≈14 ГБ", ModelKind.CHAT),
     Suggested("bartowski/Meta-Llama-3.1-8B-Instruct-GGUF", "Llama 3.1 · 8B", "≈5 ГБ", ModelKind.CHAT),
     Suggested("unsloth/DeepSeek-R1-0528-Qwen3-8B-GGUF", "DeepSeek R1 · 8B", "≈5 ГБ · рассуждения", ModelKind.CHAT),
+    Suggested("unsloth/Qwen2.5-Coder-7B-Instruct-GGUF", "👨‍💻 Qwen2.5-Coder · 7B", "≈5 ГБ · программирование", ModelKind.CHAT),
+    Suggested("unsloth/Qwen2.5-Coder-14B-Instruct-GGUF", "👨‍💻 Qwen2.5-Coder · 14B", "≈9 ГБ · программирование, видеокарта от 12 ГБ", ModelKind.CHAT),
+    Suggested("unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF", "👨‍💻 Qwen3-Coder · 30B-A3B", "≈18 ГБ · лучший код, быстрая (MoE)", ModelKind.CHAT),
     Suggested("unsloth/gpt-oss-20b-GGUF", "gpt-oss · 20B", "≈12 ГБ · модель OpenAI с открытыми весами", ModelKind.CHAT),
 )
 

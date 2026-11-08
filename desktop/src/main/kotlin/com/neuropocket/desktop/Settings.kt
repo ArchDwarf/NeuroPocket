@@ -23,6 +23,8 @@ object Paths {
 data class DesktopSettings(
     // ----- Чат -----
     val systemPrompt: String = "Ты полезный ассистент. Отвечай на языке пользователя.",
+    /** Режим чата: assistant, coder, translator, custom (свой системный промпт). */
+    val chatPreset: String = "assistant",
     val temperature: Float = 0.7f,
     val topP: Float = 0.9f,
     val topK: Int = 40,
@@ -72,7 +74,7 @@ data class DesktopSettings(
     val hfToken: String = "",
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
-        put("systemPrompt", systemPrompt); put("temperature", temperature.toDouble()); put("topP", topP.toDouble())
+        put("systemPrompt", systemPrompt); put("chatPreset", chatPreset); put("temperature", temperature.toDouble()); put("topP", topP.toDouble())
         put("topK", topK); put("repeatPenalty", repeatPenalty.toDouble()); put("maxTokens", maxTokens)
         put("contextSize", contextSize); put("threads", threads); put("chatModel", chatModel)
         put("visionMaxSide", visionMaxSide); put("videoFrames", videoFrames)
@@ -98,6 +100,7 @@ data class DesktopSettings(
                 val o = JSONObject(f.readText())
                 DesktopSettings(
                     systemPrompt = o.optString("systemPrompt", d.systemPrompt),
+                    chatPreset = o.optString("chatPreset", d.chatPreset),
                     temperature = o.optDouble("temperature", d.temperature.toDouble()).toFloat(),
                     topP = o.optDouble("topP", d.topP.toDouble()).toFloat(),
                     topK = o.optInt("topK", d.topK),
@@ -140,4 +143,43 @@ data class DesktopSettings(
     fun save() {
         Paths.settingsFile.writeText(toJson().toString(2))
     }
+}
+
+/** Режимы единого чата. */
+object ChatPresets {
+    data class Preset(val id: String, val title: String, val icon: String, val prompt: String)
+
+    private const val CAPS =
+        "Ты работаешь внутри приложения NeuroPocket полностью на компьютере пользователя, без интернета. " +
+            "Приложение само рисует картинки, изменяет фото и создаёт видео, когда пользователь просит " +
+            "(«нарисуй…», «сделай видео…», «оживи это фото») — тебе не нужно описывать, как это сделать, " +
+            "и не нужно говорить, что ты не умеешь рисовать. Пользователь может прислать фото, видео, " +
+            "файлы с кодом, документы и голосовые записи — их содержимое приходит в сообщении."
+
+    val all = listOf(
+        Preset(
+            "assistant", "Ассистент", "💬",
+            "Ты полезный и дружелюбный ассистент. Отвечай на языке пользователя, по делу, " +
+                "используй списки и примеры, когда это помогает. $CAPS",
+        ),
+        Preset(
+            "coder", "Программист", "👨‍💻",
+            "Ты опытный программист. Пиши рабочий, полный код без заглушек, всегда в блоках ``` с указанием языка " +
+                "(```python, ```kotlin…). Кратко объясняй решение и важные детали; при исправлении ошибки " +
+                "укажи причину. Если в сообщении приложен файл — опирайся на его содержимое. " +
+                "Отвечай на языке пользователя. $CAPS",
+        ),
+        Preset(
+            "translator", "Переводчик", "🌐",
+            "Ты профессиональный переводчик. Если текст на русском — переведи на английский, иначе — на русский " +
+                "(если пользователь не указал другой язык). Сохраняй смысл, стиль и форматирование. " +
+                "Выводи только перевод, без пояснений.",
+        ),
+        Preset("custom", "Свой", "⚙️", ""),
+    )
+
+    fun get(id: String) = all.find { it.id == id } ?: all.first()
+
+    fun systemPrompt(s: DesktopSettings): String =
+        if (s.chatPreset == "custom") s.systemPrompt else get(s.chatPreset).prompt
 }

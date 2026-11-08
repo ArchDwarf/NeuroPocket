@@ -127,6 +127,17 @@ class SpeechController(private val app: AppState) {
         }
     }
 
+    /** Расшифровка звука для чата; null — модель распознавания не установлена. */
+    suspend fun transcribe(samples: FloatArray, rate: Int): String? {
+        val model = asr ?: return null
+        transcribing = true
+        try {
+            return engine.recognize(model, samples, rate)
+        } finally {
+            transcribing = false
+        }
+    }
+
     /** Расшифровка аудиофайла (WAV). */
     fun transcribeFile() {
         val model = asr ?: run {

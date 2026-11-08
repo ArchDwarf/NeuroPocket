@@ -75,7 +75,7 @@ fun SettingsPane(app: AppState) {
         )
 
         SectionTitle("Чат")
-        OutlinedTextField(d.systemPrompt, { d = d.copy(systemPrompt = it) }, label = { Text("Системный промпт") },
+        OutlinedTextField(d.systemPrompt, { d = d.copy(systemPrompt = it) }, label = { Text("Свой системный промпт (режим «⚙️ Свой» в чате)") },
             modifier = Modifier.fillMaxWidth(), minLines = 2, maxLines = 6)
         LabeledSlider("Температура", fmt(d.temperature, 2), d.temperature, 0f..2f) { d = d.copy(temperature = (it * 20).roundToInt() / 20f) }
         LabeledSlider("Top-P", fmt(d.topP, 2), d.topP, 0.1f..1f) { d = d.copy(topP = (it * 20).roundToInt() / 20f) }

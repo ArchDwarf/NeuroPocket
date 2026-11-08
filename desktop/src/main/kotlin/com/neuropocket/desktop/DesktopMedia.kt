@@ -24,9 +24,12 @@ import kotlin.math.roundToInt
 /** Кадр для модели: RGB-байты и подпись (время в видео). */
 class DFrame(val rgb: ByteArray, val width: Int, val height: Int, val label: String = "")
 
-enum class DAttachmentKind { IMAGE, VIDEO }
+enum class DAttachmentKind { IMAGE, VIDEO, FILE, AUDIO }
 
-/** Вложение в чате: фото или видео (как набор кадров). */
+/**
+ * Вложение в чате: фото, видео (как набор кадров), текстовый файл/документ
+ * (его содержимое в [text]) или аудио (расшифровка в [text]).
+ */
 class DAttachment(
     val id: String,
     val kind: DAttachmentKind,
@@ -34,12 +37,40 @@ class DAttachment(
     val thumbnail: ImageBitmap,
     val frames: List<DFrame>,
     val durationSec: Float = 0f,
+    val text: String = "",
+    /** Для аудио: звук до расшифровки. */
+    val audio: Pair<FloatArray, Int>? = null,
 )
 
 object DesktopMedia {
     val IMAGE_EXT = listOf("png", "jpg", "jpeg", "bmp", "gif", "webp")
     val VIDEO_EXT = listOf("mp4", "mov", "m4v", "3gp")
     val AUDIO_EXT = listOf("wav")
+    val TEXT_EXT = listOf(
+        "txt", "md", "csv", "tsv", "json", "xml", "yaml", "yml", "toml", "ini", "cfg", "conf", "log", "html", "htm", "css",
+        "py", "kt", "kts", "java", "js", "jsx", "ts", "tsx", "c", "h", "cpp", "hpp", "cc", "cs", "go", "rs", "swift", "rb",
+        "php", "lua", "dart", "scala", "sql", "sh", "bat", "cmd", "ps1", "gradle", "r", "m", "vue", "svelte",
+    )
+    val DOC_EXT = listOf("pdf")
+    /** Сколько символов файла передавать модели. */
+    const val MAX_FILE_CHARS = 60_000
+
+    /** Значок для файла: прямоугольник с расширением. */
+    fun fileIcon(ext: String, color: java.awt.Color): ImageBitmap {
+        val img = BufferedImage(160, 160, BufferedImage.TYPE_INT_ARGB)
+        val g = img.createGraphics()
+        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+        g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON)
+        g.color = color
+        g.fillRoundRect(0, 0, 160, 160, 28, 28)
+        g.color = java.awt.Color.WHITE
+        g.font = java.awt.Font(java.awt.Font.SANS_SERIF, java.awt.Font.BOLD, if (ext.length > 4) 30 else 40)
+        val label = ext.uppercase().take(6)
+        val fm = g.fontMetrics
+        g.drawString(label, (160 - fm.stringWidth(label)) / 2, 80 + fm.ascent / 2 - 4)
+        g.dispose()
+        return img.toComposeImageBitmap()
+    }
 
     // ---------- Диалоги ----------
 
@@ -147,6 +178,26 @@ object DesktopMedia {
 
     // ---------- Видео ----------
 
+    /** Текстовый файл или PDF → текст для модели. */
+    private suspend fun loadTextFile(file: File): DAttachment = withContext(Dispatchers.IO) {
+        val ext = file.extension.lowercase()
+        val text = if (ext == "pdf") {
+            org.apache.pdfbox.Loader.loadPDF(file).use { doc ->
+                org.apache.pdfbox.text.PDFTextStripper().getText(doc)
+            }
+        } else {
+            val bytes = file.readBytes()
+            if (bytes.take(8000).count { it == 0.toByte() } > 0) throw IOException("${file.name}: это не текстовый файл")
+            String(bytes, Charsets.UTF_8)
+        }
+        if (text.isBlank()) throw IOException("${file.name}: в файле нет текста (для сканов PDF нужно распознавание)")
+        val color = if (ext == "pdf") java.awt.Color(0xC0392B) else java.awt.Color(0x2E86C1)
+        DAttachment(
+            UUID.randomUUID().toString(), DAttachmentKind.FILE, file.name, fileIcon(ext, color), emptyList(),
+            text = if (text.length > MAX_FILE_CHARS) text.take(MAX_FILE_CHARS) + "\n…[файл обрезан]" else text,
+        )
+    }
+
     private fun timeLabel(sec: Double): String {
         val t = sec.roundToInt()
         return String.format(Locale.US, "%02d:%02d", t / 60, t % 60)
@@ -170,7 +221,16 @@ object DesktopMedia {
 
     suspend fun loadAttachment(file: File, maxSide: Int, maxFrames: Int): DAttachment {
         val ext = file.extension.lowercase()
-        return if (ext in VIDEO_EXT) loadVideo(file, maxSide, maxFrames) else {
+        return if (ext in VIDEO_EXT) loadVideo(file, maxSide, maxFrames)
+        else if (ext in TEXT_EXT || ext in DOC_EXT) loadTextFile(file)
+        else if (ext in AUDIO_EXT) withContext(Dispatchers.IO) {
+            val audio = com.neuropocket.speech.Wav.read(file)
+            DAttachment(
+                UUID.randomUUID().toString(), DAttachmentKind.AUDIO, file.name, fileIcon("wav", java.awt.Color(0x8E44AD)),
+                emptyList(), durationSec = audio.first.size.toFloat() / audio.second, audio = audio,
+            )
+        }
+        else {
             val img = scaleToMax(loadImage(file), maxSide)
             DAttachment(
                 UUID.randomUUID().toString(), DAttachmentKind.IMAGE, file.name,
