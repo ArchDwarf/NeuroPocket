@@ -14,6 +14,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Create
 import androidx.compose.material.icons.filled.Face
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -40,6 +41,7 @@ import com.neuropocket.app.ui.ImageScreen
 import com.neuropocket.app.ui.MainViewModel
 import com.neuropocket.app.ui.ModelsScreen
 import com.neuropocket.app.ui.SettingsScreen
+import com.neuropocket.app.ui.VideoScreen
 
 class MainActivity : ComponentActivity() {
     private val vm: MainViewModel by viewModels()
@@ -76,6 +78,10 @@ private fun App(vm: MainViewModel) {
                     icon = { Icon(Icons.Default.Create, null) }, label = { Text("Картинки") },
                 )
                 NavigationBarItem(
+                    selected = tab == 4, onClick = { tab = 4 },
+                    icon = { Icon(Icons.Default.PlayArrow, null) }, label = { Text("Видео") },
+                )
+                NavigationBarItem(
                     selected = tab == 2, onClick = { tab = 2 },
                     icon = { Icon(Icons.AutoMirrored.Filled.List, null) }, label = { Text("Модели") },
                 )
@@ -91,6 +97,7 @@ private fun App(vm: MainViewModel) {
             0 -> ChatScreen(vm, mod, onOpenModels = { kind -> vm.speechTab = false; vm.switchKind(kind); tab = 2 })
             1 -> ImageScreen(vm, mod, onOpenModels = { vm.switchKind(ModelKind.IMAGE); tab = 2 })
             2 -> ModelsScreen(vm, mod)
+            4 -> VideoScreen(vm, mod)
             else -> SettingsScreen(vm, mod)
         }
     }

@@ -25,8 +25,9 @@ android {
         applicationId = "com.neuropocket.app"
         minSdk = 28
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        // Номер сборки растёт с каждой сборкой на GitHub — телефон ставит её как обновление
+        versionCode = (System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 0) + 100
+        versionName = "1.0." + (System.getenv("GITHUB_RUN_NUMBER") ?: "0")
 
         ndk {
             // Только arm64-v8a: это все современные телефоны (сборка в 2 раза быстрее)
@@ -48,11 +49,24 @@ android {
         }
     }
 
+    // Постоянная подпись: без неё каждая сборка подписывалась новым ключом,
+    // и телефон отказывался ставить её поверх прежней («Приложение не установлено»).
+    val keystoreFile = System.getenv("ANDROID_KEYSTORE_PATH")?.let { file(it) }?.takeIf { it.exists() }
+    signingConfigs {
+        if (keystoreFile != null) {
+            create("release") {
+                storeFile = keystoreFile
+                storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("ANDROID_KEY_ALIAS") ?: "neuropocket"
+                keyPassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
-            // Для публикации замените на собственную подпись
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (keystoreFile != null) signingConfigs.getByName("release") else signingConfigs.getByName("debug")
         }
     }
 
@@ -91,6 +105,7 @@ dependencies {
     implementation(project(":sdengine"))
     implementation(files(sherpaAar))
     implementation(libs.commons.compress)
+    implementation("org.jcodec:jcodec:0.2.5")
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.lifecycle.runtime.ktx)

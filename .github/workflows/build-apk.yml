@@ -27,9 +27,21 @@ jobs:
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "cmake;3.22.1" > /dev/null
 
       - name: Сборка
+        env:
+          # Подпись: свой ключ из секретов репозитория (если задан), иначе ключ из app/neuropocket.jks.
+          # Ключ постоянный — новые версии ставятся поверх старых.
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: |
           chmod +x gradlew
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            export ANDROID_KEYSTORE_PATH="$RUNNER_TEMP/release.jks" ANDROID_KEYSTORE_PASSWORD="$KEYSTORE_PASSWORD"
+          else
+            export ANDROID_KEYSTORE_PATH="$GITHUB_WORKSPACE/app/neuropocket.jks" ANDROID_KEYSTORE_PASSWORD=neuropocket
+          fi
           ./gradlew assembleRelease --no-daemon
+          mv app/build/outputs/apk/release/app-release.apk app/build/outputs/apk/release/NeuroPocket.apk
 
       - name: Загрузка APK
         uses: actions/upload-artifact@v4
@@ -44,7 +56,10 @@ jobs:
           tag_name: android-latest
           name: NeuroPocket для Android (последняя сборка)
           body: |
-            APK для Android 9+ (arm64). Сборка из коммита ${{ github.sha }}.
+            APK для Android 9+ (arm64-v8a). Сборка №${{ github.run_number }} из коммита ${{ github.sha }}.
+
+            Если раньше стояла версия до 10.11.2026 — один раз удалите её, затем установите эту.
+            Дальше обновления будут ставиться поверх.
           files: app/build/outputs/apk/release/*.apk
           overwrite_files: true
           make_latest: false

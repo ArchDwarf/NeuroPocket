@@ -127,7 +127,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         settings = { settings },
         saveSettings = { updateSettings(it, reload = false) },
         toast = ::toast,
-        beforeLoad = ::freeChatIfLowMemory,
+        beforeLoad = {
+            if (video.isLoaded && !video.generating) video.unload()
+            freeChatIfLowMemory()
+        },
+    )
+
+    // ----- Видео -----
+    val video = VideoStudio(
+        app = app,
+        scope = viewModelScope,
+        settings = { settings },
+        toast = ::toast,
+        beforeLoad = ::freeAllForVideo,
     )
 
     // ----- Речь -----
@@ -263,6 +275,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (lowMemory && studio.isModelLoaded && !studio.generating) {
             studio.unload()
         }
+        if (video.isLoaded && !video.generating) video.unload()
         modelState = ModelState.Loading(name)
         modelState = try {
             val loaded = engine.load(path, mmproj, settings.contextSize, settings.threads)
@@ -291,6 +304,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 stopGeneration()
                 genJob?.join()
             }
+            engine.unload()
+            modelState = ModelState.None
+        }
+    }
+
+    /** Видеомодели огромные: перед загрузкой выгружаем чат и модель картинок. */
+    private suspend fun freeAllForVideo() {
+        if (studio.isModelLoaded && !studio.generating) studio.unload()
+        if (engine.isLoaded) {
+            stopGeneration()
+            genJob?.join()
             engine.unload()
             modelState = ModelState.None
         }
